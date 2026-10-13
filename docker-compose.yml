@@ -16,6 +16,7 @@ services:
       - ${STRUCTURIZR_WORKSPACE:-./docker/workspace}:/usr/local/structurizr
 
   export:
+    build: .
     image: structurizr-pdf:latest
     profiles: ["export"]
     command: ["export", "-w", "workspace.dsl", "-f", "pdf"]

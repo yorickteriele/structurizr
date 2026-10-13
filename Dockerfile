@@ -7,8 +7,10 @@
 FROM mcr.microsoft.com/playwright/java:v1.62.0-noble AS build
 
 WORKDIR /src
-COPY structurizr-application structurizr-application
-RUN mvn -B -q -DskipTests -Dgpg.skip -Dmaven.javadoc.skip -f structurizr-application/pom.xml package
+COPY . .
+# the application depends on the library modules in this repo (e.g. structurizr-dsl), so install those first
+RUN mvn -B -q -DskipTests -Dgpg.skip -Dmaven.javadoc.skip -pl structurizr-dsl,structurizr-inspection -am install \
+ && mvn -B -q -DskipTests -Dgpg.skip -Dmaven.javadoc.skip -f structurizr-application/pom.xml package
 
 # ---- runtime stage: Java + Chromium (the Playwright version must match the one in structurizr-application/pom.xml) ----
 FROM mcr.microsoft.com/playwright/java:v1.62.0-noble
