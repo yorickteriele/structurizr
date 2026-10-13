@@ -7210,9 +7210,14 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         // build the ELK graph: elements are nodes, boundaries/groups/deployment nodes are compound nodes
         var nodesById = {};
         var portSides = undefined;
+        // elements with relationships to the column of externals on the right are preferably put on the right
+        const linkedToExternal = {};
+        const byExternalLinks = function(a, b) {
+            return (linkedToExternal['' + a.id] ? 1 : 0) - (linkedToExternal['' + b.id] ? 1 : 0);
+        };
         var portOrderBoxes = undefined;
         const toElkNode = function(cell) {
-            const children = cell.getEmbeddedCells().filter(function(c) { return c.isElement() && isLaidOut(c); });
+            const children = cell.getEmbeddedCells().filter(function(c) { return c.isElement() && isLaidOut(c); }).sort(byExternalLinks);
             const size = cell.size();
             const node = { id: '' + cell.id, cell: cell };
             if (children.length > 0) {
@@ -7279,6 +7284,27 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             return isLaidOut(cell) && (cell.getParentCell() === null || cell.getParentCell() === undefined);
         });
 
+        // from container views onwards (i.e. when there's a boundary), elements outside the boundaries (other than people)
+        // go in a column on the right, rather than being part of the top-to-bottom layout
+        const isBoundary = function(cell) {
+            return cell.attributes.type === 'structurizr.boundary' || cell.getEmbeddedCells().filter(isLaidOut).length > 0;
+        };
+        var externals = [];
+        if (direction === 'DOWN' && roots.some(isBoundary)) {
+            externals = roots.filter(function(cell) {
+                if (isBoundary(cell) || cell.elementInView === undefined) return false;
+                const element = structurizr.workspace.findElementById(cell.elementInView.id);
+                return element !== undefined && element !== null && element.type !== 'Person';
+            });
+            if (externals.length === roots.length) {
+                externals = [];
+            }
+        }
+        const externalIds = {};
+        externals.forEach(function(cell) { externalIds['' + cell.id] = true; });
+        const mainRoots = roots.filter(function(cell) { return !externalIds['' + cell.id]; });
+        const externalEdges = [];
+
         const edges = [];
         graph.getLinks().forEach(function(link, index) {
             const sourceId = '' + link.get('source').id;
@@ -7297,13 +7323,25 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
                         layoutOptions: { 'elk.edgeLabels.inline': 'true' }
                     } ];
                 }
-                edges.push(edge);
+                if (externalIds[sourceId] || externalIds[targetId]) {
+                    externalEdges.push(edge);
+                } else {
+                    edges.push(edge);
+                }
             }
         });
 
         const portId = function(nodeId, side, edgeId) {
             return nodeId + '_' + side + '_' + edgeId;
         };
+
+        externalEdges.forEach(function(edge) {
+            linkedToExternal[edge.sources[0]] = true;
+            linkedToExternal[edge.targets[0]] = true;
+        });
+        if (externals.length > 0) {
+            layoutOptions['elk.layered.considerModelOrder.strategy'] = 'PREFER_NODES';
+        }
 
         const buildElkGraph = function(sides) {
             nodesById = {};
@@ -7315,7 +7353,7 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
                     'elk.algorithm': 'layered',
                     'elk.hierarchyHandling': 'INCLUDE_CHILDREN'
                 }, layoutOptions),
-                children: roots.map(toElkNode),
+                children: mainRoots.slice().sort(byExternalLinks).map(toElkNode),
                 edges: edges.map(function(edge) {
                     const side = sides !== undefined ? sides[edge.id] : undefined;
                     return {
@@ -7660,8 +7698,8 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         };
 
         const leafBoxes = function(boxes) {
-            return Object.keys(nodesById).filter(function(id) {
-                return nodesById[id].children === undefined && boxes[id] !== undefined;
+            return Object.keys(nodesById).concat(Object.keys(externalIds)).filter(function(id) {
+                return (externalIds[id] || nodesById[id].children === undefined) && boxes[id] !== undefined;
             }).map(function(id) { return boxes[id]; });
         };
 
@@ -7703,6 +7741,26 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
                     finalBoxes[id] = { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
                 }
             });
+            if (externals.length > 0) {
+                const leafIds = Object.keys(nodesById).filter(function(id) { return nodesById[id].children === undefined; });
+                const placed = placeExternalsRight(finalBoxes, leafIds, externals.map(function(cell) {
+                    return { id: '' + cell.id, width: cell.size().width, height: cell.size().height };
+                }), externalEdges.map(function(edge) {
+                    return { id: edge.id, source: edge.sources[0], target: edge.targets[0], labelWidth: (edge.labels && edge.labels.length > 0) ? edge.labels[0].width * 0.8 : 0, labelHeight: (edge.labels && edge.labels.length > 0) ? edge.labels[0].height : 0 };
+                }), routes);
+                externals.forEach(function(cell) {
+                    const position = placed.positions['' + cell.id];
+                    positionElement(cell, position.x, position.y);
+                    finalBoxes['' + cell.id] = { x: position.x, y: position.y, width: cell.size().width, height: cell.size().height };
+                });
+                externalEdges.forEach(function(edge) {
+                    const route = placed.routes.filter(function(r) { return r.id === edge.id; })[0];
+                    if (route !== undefined) {
+                        routes.push({ edge: edge, points: route.points });
+                    }
+                });
+            }
+
             removeJogs(routes, finalBoxes);
             moveOffBorders(routes, finalBoxes);
             placeLabels(routes, leafBoxes(finalBoxes), boundaryBorders(finalBoxes));
@@ -7764,6 +7822,184 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             structurizr.diagram.zoomToWidthOrHeight();
             centreDiagram();
         });
+    }
+
+    // Places "external" elements in a column to the right of the rest of the diagram, and routes the relationships to/from them.
+    //   boxes: { id: {x,y,width,height} } of everything already laid out (leaves and boundaries)
+    //   leafIds: ids of the leaf elements already laid out (obstacles)
+    //   externals: [ { id, width, height } ]
+    //   edges: [ { id, source, target, labelWidth } ] relationships that involve at least one external
+    // returns { positions: { id: {x,y} }, routes: [ { id, points } ] }
+    function placeExternalsRight(boxes, leafIds, externals, edges, existingRoutes, options) {
+        options = options || {};
+        const channelSpacing = options.channelSpacing || 25;
+        const nodeSpacing = options.nodeSpacing || 60;
+        const margin = 30;
+        const isExternal = {};
+        externals.forEach(function(e) { isExternal[e.id] = true; });
+
+        const all = Object.keys(boxes).map(function(id) { return boxes[id]; });
+        const right = Math.max.apply(null, all.map(function(b) { return b.x + b.width; }));
+        const top = Math.min.apply(null, all.map(function(b) { return b.y; }));
+        const obstacles = leafIds.map(function(id) { return boxes[id]; }).filter(function(b) { return b !== undefined; });
+
+        const crossEdges = edges.filter(function(e) {
+            return isExternal[e.source] !== isExternal[e.target] && boxes[isExternal[e.source] ? e.target : e.source] !== undefined;
+        });
+        const labelWidth = Math.max.apply(null, [ 0 ].concat(crossEdges.map(function(e) { return e.labelWidth || 0; })));
+        // horizontal lines into the column carry labels, so keep them far enough apart for those
+        const pointSpacing = Math.max(40, 10 + Math.max.apply(null, [ 0 ].concat(crossEdges.map(function(e) { return e.labelHeight || 0; }))));
+        const channelsWidth = (crossEdges.length + 1) * channelSpacing;
+        const gap = Math.max(channelsWidth + labelWidth + 40, 120);
+        const columnX = right + gap;
+
+        // 1. the order and vertical position of the externals: next to the middle of the elements they're connected to
+        const wanted = {};
+        externals.forEach(function(ext) {
+            const ys = [];
+            crossEdges.forEach(function(e) {
+                const other = e.source === ext.id ? e.target : (e.target === ext.id ? e.source : undefined);
+                if (other !== undefined && boxes[other]) ys.push(boxes[other].y + (boxes[other].height / 2));
+            });
+            wanted[ext.id] = ys.length > 0 ? ys.reduce(function(a, b) { return a + b; }, 0) / ys.length : top;
+        });
+        const column = externals.slice().sort(function(a, b) { return wanted[a.id] - wanted[b.id]; });
+        const width = Math.max.apply(null, column.map(function(e) { return e.width; }));
+        const positions = {};
+        var previousBottom = -Infinity;
+        column.forEach(function(ext) {
+            var y = Math.max(wanted[ext.id] - (ext.height / 2), previousBottom + nodeSpacing, top);
+            positions[ext.id] = { x: columnX + ((width - ext.width) / 2), y: y };
+            previousBottom = y + ext.height;
+        });
+        const extBox = function(id) { const e = externals.filter(function(x) { return x.id === id; })[0]; return { x: positions[id].x, y: positions[id].y, width: e.width, height: e.height }; };
+
+        const blocked = function(a, b, except) {
+            return obstacles.some(function(box) {
+                if (except.indexOf(box) > -1) return false;
+                if (Math.abs(a.y - b.y) < 1) {
+                    return a.y > box.y - 5 && a.y < box.y + box.height + 5 && Math.max(a.x, b.x) > box.x && Math.min(a.x, b.x) < box.x + box.width;
+                }
+                return a.x > box.x - 5 && a.x < box.x + box.width + 5 && Math.max(a.y, b.y) > box.y && Math.min(a.y, b.y) < box.y + box.height;
+            });
+        };
+
+        // 2. points on the sides: the externals' left sides, spread in order of where the lines come from
+        const resolve = function(wants, lo, hi, gap) {
+            // wants: array of numbers (already in the desired order); returns positions at least gap apart within [lo, hi]
+            const n = wants.length;
+            const g = n > 1 ? Math.min(gap, (hi - lo) / (n - 1)) : 0;
+            const p = wants.map(function(w) { return Math.min(hi, Math.max(lo, w)); });
+            for (var i = 1; i < n; i++) p[i] = Math.max(p[i], p[i - 1] + g);
+            for (var j = n - 1; j >= 0; j--) p[j] = Math.min(p[j], j === n - 1 ? hi : p[j + 1] - g);
+            for (var k = 1; k < n; k++) p[k] = Math.max(p[k], p[k - 1] + g);
+            return p;
+        };
+        const spreadOn = function(lo, hi, count, index) {
+            return lo + ((hi - lo) * (index + 1) / (count + 1));
+        };
+        const extPoint = {};
+        externals.forEach(function(ext) {
+            const mine = crossEdges.filter(function(e) { return e.source === ext.id || e.target === ext.id; });
+            mine.sort(function(a, b) {
+                const oa = boxes[a.source === ext.id ? a.target : a.source], ob = boxes[b.source === ext.id ? b.target : b.source];
+                return (oa.y + oa.height / 2) - (ob.y + ob.height / 2);
+            });
+            const box = extBox(ext.id);
+            const wants = mine.map(function(e) { const o = boxes[e.source === ext.id ? e.target : e.source]; return o.y + (o.height / 2); });
+            const ys = resolve(wants, box.y + margin, box.y + box.height - margin, pointSpacing);
+            mine.forEach(function(e, i) { extPoint[e.id] = { x: box.x, y: ys[i] }; });
+        });
+
+        // 3. route each relationship: out of the element's right side (or its top/bottom when something is in the way),
+        //    along its own channel, and into the external's left side
+        const routes = [];
+        const exits = {};
+        crossEdges.forEach(function(e) {
+            const internalId = isExternal[e.source] ? e.target : e.source;
+            (exits[internalId] = exits[internalId] || []).push(e);
+        });
+
+        const sidePoint = {};
+        Object.keys(exits).forEach(function(id) {
+            const box = boxes[id];
+            const list = exits[id].slice().sort(function(a, b) { return extPoint[a.id].y - extPoint[b.id].y; });
+            const ys = resolve(list.map(function(e) { return extPoint[e.id].y; }), box.y + margin, box.y + box.height - margin, pointSpacing);
+            list.forEach(function(e, i) { sidePoint[e.id] = ys[i]; });
+        });
+
+        var channel = 0;
+        const corridors = [];
+        const usedPoints = [];
+        (existingRoutes || []).forEach(function(r) { usedPoints.push(r.points[0]); usedPoints.push(r.points[r.points.length - 1]); });
+        // channels: lines that go further down get the channels further right, so that they don't cross
+        const order = crossEdges.slice().sort(function(a, b) { return extPoint[a.id].y - extPoint[b.id].y; });
+        order.forEach(function(e) {
+            const internalId = isExternal[e.source] ? e.target : e.source;
+            const box = boxes[internalId];
+            const end = extPoint[e.id];
+            const channelX = right + ((channel++ + 1) * channelSpacing);
+            const siblings = exits[internalId];
+            const index = siblings.indexOf(e);
+            var points;
+
+            // straight out of the right side, lined up with the external if possible
+            const lo = box.y + margin, hi = box.y + box.height - margin;
+            var y = sidePoint[e.id];
+            const start = { x: box.x + box.width, y: y };
+            if (!blocked(start, { x: channelX, y: y }, [ box ])) {
+                points = Math.abs(y - end.y) < 1 ? [ start, end ] : [ start, { x: channelX, y: y }, { x: channelX, y: end.y }, end ];
+            } else {
+                // out of the top or bottom, along the free space between two rows, then right
+                const down = end.y > box.y + (box.height / 2);
+                const sideY = down ? box.y + box.height : box.y;
+
+                // a point on that side that's clear of the other lines (as far right as possible)
+                const taken = usedPoints.filter(function(p) { return Math.abs(p.y - sideY) < 2; }).map(function(p) { return p.x; });
+                var sx = undefined;
+                for (var x = box.x + box.width - margin; x >= box.x + margin; x -= 5) {
+                    if (taken.every(function(t) { return Math.abs(t - x) >= 40; })) { sx = x; break; }
+                }
+                if (sx === undefined) sx = box.x + box.width - margin;
+                usedPoints.push({ x: sx, y: sideY });
+
+                // the free space (between rows) nearest to the element, for a horizontal line from sx to the channel
+                const spans = obstacles.filter(function(o) { return o !== box && o.x + o.width > sx && o.x < channelX; })
+                    .map(function(o) { return [ o.y - 15, o.y + o.height + 15 ]; })
+                    .concat(corridors.filter(function(c) { return c.x1 > sx && c.x0 < channelX; }).map(function(c) { return [ c.y - channelSpacing / 2, c.y + channelSpacing / 2 ]; }));
+                const free = function(y) { return spans.every(function(s) { return y <= s[0] || y >= s[1]; }); };
+                var corridorY = undefined;
+                for (var d = 20; d < 2000; d += 5) {
+                    const y = down ? sideY + d : sideY - d;
+                    if (free(y)) {
+                        // prefer the middle of the free space
+                        var y2 = y;
+                        while (free(down ? y2 + 5 : y2 - 5) && Math.abs(y2 - y) < 40) y2 = down ? y2 + 5 : y2 - 5;
+                        corridorY = (y + y2) / 2;
+                        break;
+                    }
+                }
+                if (corridorY === undefined) corridorY = down ? sideY + 20 : sideY - 20;
+                corridors.push({ x0: sx, x1: channelX, y: corridorY });
+                points = [ { x: sx, y: sideY }, { x: sx, y: corridorY }, { x: channelX, y: corridorY }, { x: channelX, y: end.y }, end ];
+            }
+
+            if (e.source !== internalId) points.reverse();
+            routes.push({ id: e.id, points: points });
+        });
+
+        // 4. relationships between externals: down the column, or round the right-hand side
+        edges.filter(function(e) { return isExternal[e.source] && isExternal[e.target] && positions[e.source] && positions[e.target]; }).forEach(function(e) {
+            const s = extBox(e.source), t = extBox(e.target);
+            const x = columnX + (width / 2);
+            if (s.y < t.y) {
+                routes.push({ id: e.id, points: [ { x: x, y: s.y + s.height }, { x: x, y: t.y } ] });
+            } else {
+                routes.push({ id: e.id, points: [ { x: x, y: s.y }, { x: x, y: t.y + t.height } ] });
+            }
+        });
+
+        return { positions: positions, routes: routes };
     }
 
     // the same padding that is used when resizing boundaries/groups/deployment nodes around their contents
