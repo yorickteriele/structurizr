@@ -986,31 +986,35 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             }
         });
 
-        if (view.automaticLayout) {
-            if (view.automaticLayout) {
-                structurizr.diagram.applyAutomaticLayout(
-                    view.automaticLayout.rankDirection,
-                    view.automaticLayout.rankSeparation,
-                    view.automaticLayout.nodeSeparation,
-                    view.automaticLayout.edgeSeparation,
-                    view.automaticLayout.vertices
-                );
+        const renderingFinished = function() {
+            if (callback !== undefined) {
+                callback();
             }
+
+            diagramRendered = true;
+        };
+
+        if (view.automaticLayout) {
+            structurizr.diagram.applyAutomaticLayout(
+                view.automaticLayout.rankDirection,
+                view.automaticLayout.rankSeparation,
+                view.automaticLayout.nodeSeparation,
+                view.automaticLayout.edgeSeparation,
+                view.automaticLayout.vertices,
+                renderingFinished
+            );
         } else if (forceApplyAutomaticLayout) {
             structurizr.diagram.applyAutomaticLayout(
                 structurizr.ui.DEFAULT_AUTOLAYOUT_RANK_DIRECTION,
                 structurizr.ui.DEFAULT_AUTOLAYOUT_RANK_SEPARATION,
                 structurizr.ui.DEFAULT_AUTOLAYOUT_NODE_SEPARATION,
                 structurizr.ui.DEFAULT_AUTOLAYOUT_EDGE_SEPARATION,
-                structurizr.ui.DEFAULT_AUTOLAYOUT_VERTICES
+                structurizr.ui.DEFAULT_AUTOLAYOUT_VERTICES,
+                renderingFinished
             );
+        } else {
+            renderingFinished();
         }
-
-        if (callback !== undefined) {
-            callback();
-        }
-
-        diagramRendered = true;
     }
 
     function repositionAllParentCells() {
@@ -7115,7 +7119,311 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         });
     };
 
-    this.applyAutomaticLayout = function(rankDirection, rankSeparation, nodeSeparation, edgeSeparation, linkVertices) {
+    this.applyAutomaticLayout = function(rankDirection, rankSeparation, nodeSeparation, edgeSeparation, linkVertices, callback) {
+        const done = function() {
+            if (callback !== undefined) {
+                callback();
+            }
+        };
+
+        if (useElkLayout()) {
+            const renderedView = currentView;
+            const self = this;
+
+            diagramRendered = false;
+            applyElkLayout(rankDirection, rankSeparation, nodeSeparation, edgeSeparation)
+                .catch(function(err) {
+                    console.error('There was an error applying the ELK automatic layout, falling back to dagre: ' + err);
+                    if (renderedView === currentView) {
+                        applyDagreLayout.call(self, rankDirection, rankSeparation, nodeSeparation, edgeSeparation, linkVertices);
+                    }
+                })
+                .finally(function() {
+                    if (renderedView === currentView) {
+                        diagramRendered = true;
+                        done();
+                    }
+                });
+        } else {
+            applyDagreLayout.call(this, rankDirection, rankSeparation, nodeSeparation, edgeSeparation, linkVertices);
+            done();
+        }
+    };
+
+    // ELK (https://eclipse.dev/elk/) is used by default; set the view/workspace property "structurizr.autolayout" to "dagre" to use dagre instead
+    function useElkLayout() {
+        if (typeof ELK === 'undefined') {
+            return false;
+        }
+
+        const viewOrFilter = (currentFilter !== undefined ? currentFilter : currentView);
+        const engine = getViewOrViewSetProperty(viewOrFilter, 'structurizr.autolayout', 'elk');
+        return ('' + engine).toLowerCase() !== 'dagre';
+    }
+
+    function applyElkLayout(rankDirection, rankSeparation, nodeSeparation, edgeSeparation) {
+        const renderedView = currentView;
+
+        var direction;
+        switch(rankDirection) {
+            case 'BottomTop':
+                direction = 'UP';
+                break;
+            case 'LeftRight':
+                direction = 'RIGHT';
+                break;
+            case 'RightLeft':
+                direction = 'LEFT';
+                break;
+            default:
+                direction = 'DOWN';
+        }
+
+        var cellViews = [];
+        cells.forEach(function(cell) {
+            var element = paper.findViewByModel(cell);
+            if (element.model.positionCalculated === false) {
+                cellViews.push(element);
+            }
+        });
+        addToUndoBuffer(getCurrentElementPositions(cellViews).concat(getCurrentLinkPositions(graph.getLinks())));
+
+        const spacing = Math.max(edgeSeparation, 20);
+        const layoutOptions = {
+            'elk.direction': direction,
+            'elk.edgeRouting': 'ORTHOGONAL',
+            'elk.spacing.nodeNode': '' + nodeSeparation,
+            'elk.layered.spacing.nodeNodeBetweenLayers': '' + rankSeparation,
+            'elk.spacing.edgeNode': '' + spacing,
+            'elk.layered.spacing.edgeNodeBetweenLayers': '' + spacing,
+            'elk.spacing.edgeEdge': '' + spacing,
+            'elk.layered.spacing.edgeEdgeBetweenLayers': '' + spacing,
+            'elk.spacing.edgeLabel': '5',
+            'elk.edgeLabels.placement': 'CENTER',
+            'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
+            'elk.layered.nodePlacement.favorStraightEdges': 'true',
+            'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
+            'elk.layered.thoroughness': '20'
+        };
+
+        // build the ELK graph: elements are nodes, boundaries/groups/deployment nodes are compound nodes
+        const nodesById = {};
+        const toElkNode = function(cell) {
+            const children = cell.getEmbeddedCells().filter(function(c) { return c.isElement() && isLaidOut(c); });
+            const size = cell.size();
+            const node = { id: '' + cell.id, cell: cell };
+            if (children.length > 0) {
+                const padding = getBoundaryPadding(cell);
+                // layout options aren't inherited, so each compound node needs them too
+                node.layoutOptions = Object.assign({}, layoutOptions, {
+                    'elk.padding': '[top=' + padding.top + ',left=' + padding.left + ',bottom=' + padding.bottom + ',right=' + padding.right + ']'
+                });
+                node.children = children.map(toElkNode);
+            } else {
+                node.width = size.width;
+                node.height = size.height;
+            }
+            nodesById[node.id] = node;
+
+            return node;
+        };
+
+        // only elements and boundaries take part (not helper cells, such as those used for the diagram key)
+        const isLaidOut = function(cell) {
+            return cell.elementInView !== undefined || cell.attributes.type === 'structurizr.boundary' || cell.getEmbeddedCells().length > 0;
+        };
+        const roots = graph.getElements().filter(function(cell) {
+            return isLaidOut(cell) && (cell.getParentCell() === null || cell.getParentCell() === undefined);
+        });
+
+        const edges = [];
+        graph.getLinks().forEach(function(link, index) {
+            const sourceId = '' + link.get('source').id;
+            const targetId = '' + link.get('target').id;
+            if (link.get('source').id && link.get('target').id && sourceId !== targetId) {
+                const edge = { id: 'e' + index, sources: [ sourceId ], targets: [ targetId ], link: link };
+                const labelSize = link.get('labelSize');
+                const labels = link.get('labels');
+                if (labelSize && labels && labels.length > 0) {
+                    // ELK only reserves space for labels that have text; inline labels are centred on the line
+                    edge.labels = [ {
+                        id: 'l' + index,
+                        text: 'label',
+                        width: labelSize.width,
+                        height: labelSize.height,
+                        layoutOptions: { 'elk.edgeLabels.inline': 'true' }
+                    } ];
+                }
+                edges.push(edge);
+            }
+        });
+
+        const elkGraph = {
+            id: 'root',
+            layoutOptions: Object.assign({
+                'elk.algorithm': 'layered',
+                'elk.hierarchyHandling': 'INCLUDE_CHILDREN'
+            }, layoutOptions),
+            children: roots.map(toElkNode),
+            edges: edges.map(function(edge) {
+                return { id: edge.id, sources: edge.sources, targets: edge.targets, labels: edge.labels };
+            })
+        };
+
+        return new ELK().layout(elkGraph).then(function(result) {
+            if (renderedView !== currentView) {
+                // the view changed while the layout was running
+                return;
+            }
+
+            // ELK coordinates are relative to the parent node, so work out absolute positions first
+            const absolute = { root: { x: 0, y: 0 } };
+            const parents = {};
+            const calculateAbsolutePositions = function(node, parent) {
+                const parentPosition = absolute[parent.id];
+                absolute[node.id] = { x: parentPosition.x + (node.x || 0), y: parentPosition.y + (node.y || 0) };
+                parents[node.id] = parent.id;
+                (node.children || []).forEach(function(child) { calculateAbsolutePositions(child, node); });
+            };
+            result.children.forEach(function(child) { calculateAbsolutePositions(child, result); });
+
+            const ancestorsOf = function(id) {
+                const ancestors = [];
+                var parentId = parents[id];
+                while (parentId !== undefined) {
+                    ancestors.push(parentId);
+                    parentId = parents[parentId];
+                }
+                return ancestors;
+            };
+
+            // edge coordinates are relative to the edge's container (as determined by ELK)
+            const edgeContainer = function(sourceId, targetId) {
+                const sourceAncestors = ancestorsOf(sourceId);
+                const targetAncestors = ancestorsOf(targetId);
+                if (targetAncestors.indexOf(sourceId) > -1) {
+                    return sourceId;
+                }
+                if (sourceAncestors.indexOf(targetId) > -1) {
+                    return targetId;
+                }
+                for (var i = 0; i < sourceAncestors.length; i++) {
+                    if (targetAncestors.indexOf(sourceAncestors[i]) > -1) {
+                        return sourceAncestors[i];
+                    }
+                }
+                return 'root';
+            };
+
+            // 1. position the leaf elements (boundaries are resized around their contents automatically)
+            Object.keys(nodesById).forEach(function(id) {
+                const node = nodesById[id];
+                if (node.children === undefined && absolute[id] !== undefined) {
+                    positionElement(node.cell, absolute[id].x, absolute[id].y);
+                }
+            });
+            repositionAllParentCells();
+
+            // 2. route each relationship along the orthogonal path calculated by ELK, with its label where ELK put it
+            const edgesById = {};
+            edges.forEach(function(edge) { edgesById[edge.id] = edge; });
+            const resultEdges = [];
+            const collectEdges = function(node) {
+                (node.edges || []).forEach(function(e) { resultEdges.push(e); });
+                (node.children || []).forEach(collectEdges);
+            };
+            collectEdges(result);
+
+            resultEdges.forEach(function(resultEdge) {
+                const edge = edgesById[resultEdge.id];
+                if (edge === undefined || resultEdge.sections === undefined || resultEdge.sections.length === 0) {
+                    return;
+                }
+
+                const offset = absolute[edgeContainer(edge.sources[0], edge.targets[0])] || { x: 0, y: 0 };
+                const section = resultEdge.sections[0];
+                const points = [ section.startPoint ].concat(section.bendPoints || []).concat([ section.endPoint ]);
+                const link = edge.link;
+
+                // ELK's route is already orthogonal, so draw straight segments between its points (the orthogonal router would re-route it)
+                link.unset('router');
+                if (editable && link.relationshipInView) {
+                    link.relationshipInView.routing = 'Direct';
+                }
+                const vertices = points.map(function(p) { return { x: Math.round(p.x + offset.x), y: Math.round(p.y + offset.y) }; });
+
+                // ELK's start/end points are on the element borders; nudge them slightly outwards (along the line),
+                // so that JointJS can always find where the line meets the element
+                const nudge = function(point, towards) {
+                    const dx = towards.x - point.x;
+                    const dy = towards.y - point.y;
+                    const length = Math.sqrt((dx * dx) + (dy * dy));
+                    if (length > 4) {
+                        point.x = Math.round(point.x + (dx / length) * 3);
+                        point.y = Math.round(point.y + (dy / length) * 3);
+                    }
+                };
+                if (vertices.length >= 2) {
+                    nudge(vertices[0], vertices[1]);
+                    nudge(vertices[vertices.length - 1], vertices[vertices.length - 2]);
+                }
+                link.set('vertices', vertices);
+
+                // and make the first/last segments meet the elements at right angles
+                link.prop('source/anchor', { name: 'perpendicular' });
+                link.prop('target/anchor', { name: 'perpendicular' });
+
+                if (resultEdge.labels && resultEdge.labels.length > 0) {
+                    const label = resultEdge.labels[0];
+                    const linkView = paper.findViewByModel(link);
+                    const totalLength = linkView.getConnectionLength();
+                    if (totalLength > 0) {
+                        const centre = { x: offset.x + label.x + (label.width / 2), y: offset.y + label.y + (label.height / 2) };
+                        const distance = Math.min(0.95, Math.max(0.05, linkView.getClosestPointLength(centre) / totalLength));
+                        const labels = JSON.parse(JSON.stringify(link.get('labels')));
+                        labels.forEach(function(l) {
+                            l.position.distance = distance;
+                            if (l.position.calculatedOffset) {
+                                l.position.offset = l.position.calculatedOffset;
+                            }
+                        });
+                        link.set('labels', labels);
+                        if (link.relationshipInView) {
+                            link.relationshipInView.position = Math.round(distance * 100);
+                        }
+                    }
+                }
+            });
+
+            structurizr.diagram.autoPageSize();
+            structurizr.diagram.zoomToWidthOrHeight();
+            centreDiagram();
+        });
+    }
+
+    // the same padding that is used when resizing boundaries/groups/deployment nodes around their contents
+    function getBoundaryPadding(parentCell) {
+        const margin = 15;
+        const padding = { top: clusterPadding, right: clusterPadding, bottom: clusterPadding + margin, left: clusterPadding };
+
+        try {
+            const metadataText = parentCell.attr('.structurizrMetaData') ? parentCell.attr('.structurizrMetaData').text : undefined;
+            const nameFontSize = parseInt(parentCell.attr('.structurizrName')['font-size']) || 24;
+            const metadataFontSize = parentCell.attr('.structurizrMetaData') ? (parseInt(parentCell.attr('.structurizrMetaData')['font-size']) || 0) : 0;
+
+            if (metadataText && metadataText.length > 0) {
+                padding.bottom = padding.bottom + nameFontSize + metadataFontSize + margin;
+            } else {
+                padding.bottom = padding.bottom + nameFontSize + margin;
+            }
+        } catch (e) {
+            padding.bottom = padding.bottom + 50;
+        }
+
+        return padding;
+    }
+
+    function applyDagreLayout(rankDirection, rankSeparation, nodeSeparation, edgeSeparation, linkVertices) {
         try {
             var cellViews = [];
             cells.forEach(function(cell) {

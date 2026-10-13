@@ -32,6 +32,7 @@ class StaticSiteExporter {
         writeStaticFile("js/jointjs-Core-4.1.3.js", outputDir);
         writeStaticFile("js/jointjs-DirectedGraph-4.1.3.min.js", outputDir);
         writeStaticFile("js/dagre-1.1.8.js", outputDir);
+        writeStaticFile("js/elk-0.9.3.bundled.js", outputDir);
         writeStaticFile("js/graphlib-2.2.4.min.js", outputDir);
         writeStaticFile("js/jointjs-DirectedGraph-4.1.3.min.js", outputDir);
         writeStaticFile("js/structurizr.js", outputDir);
