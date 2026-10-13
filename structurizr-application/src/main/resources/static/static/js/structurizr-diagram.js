@@ -6575,7 +6575,6 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
     // snap elements to the edges/centres of other elements while dragging (like draw.io), with guide lines;
     // hold the Alt key while dragging to only snap to the grid
     const snapDistanceInPixels = 8;
-    const elkSidesCache = {};
     var snapGuides = [];
 
     if (joint.dia.ElementView.prototype.structurizrSnapInstalled !== true) {
@@ -7189,16 +7188,16 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         });
         addToUndoBuffer(getCurrentElementPositions(cellViews).concat(getCurrentLinkPositions(graph.getLinks())));
 
-        const spacing = Math.max(edgeSeparation, 20);
+        // ELK reserves room for relationship labels itself, so the (dagre-oriented) separations are capped to keep things compact
         const layoutOptions = {
             'elk.direction': direction,
             'elk.edgeRouting': 'ORTHOGONAL',
-            'elk.spacing.nodeNode': '' + nodeSeparation,
-            'elk.layered.spacing.nodeNodeBetweenLayers': '' + rankSeparation,
-            'elk.spacing.edgeNode': '' + spacing,
-            'elk.layered.spacing.edgeNodeBetweenLayers': '' + spacing,
-            'elk.spacing.edgeEdge': '' + spacing,
-            'elk.layered.spacing.edgeEdgeBetweenLayers': '' + spacing,
+            'elk.spacing.nodeNode': '' + Math.min(nodeSeparation, 60),
+            'elk.layered.spacing.nodeNodeBetweenLayers': '' + Math.min(rankSeparation, 40),
+            'elk.spacing.edgeNode': '25',
+            'elk.layered.spacing.edgeNodeBetweenLayers': '15',
+            'elk.spacing.edgeEdge': '25',
+            'elk.layered.spacing.edgeEdgeBetweenLayers': '15',
             'elk.spacing.edgeLabel': '5',
             'elk.edgeLabels.placement': 'CENTER',
             'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
@@ -7465,7 +7464,7 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
 
                 var best = undefined;
                 segments.forEach(function(segment) {
-                    [ 0.5, 0.35, 0.65, 0.2, 0.8 ].forEach(function(t) {
+                    [ 0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8, 0.12, 0.88 ].forEach(function(t) {
                         if (best !== undefined && best.conflicts === 0) return;
                         const centre = { x: segment.a.x + ((segment.b.x - segment.a.x) * t), y: segment.a.y + ((segment.b.y - segment.a.y) * t) };
                         const box = { x: centre.x - (width / 2), y: centre.y - (height / 2), width: width, height: height };
@@ -7499,48 +7498,99 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             return conflicts;
         };
 
-        // a tiny jog just before/after an element (because neighbouring points on the sides don't quite line up) is
-        // removed by moving the end of the line slightly along the element's side
-        const removeTinyJogs = function(routes, boxes) {
-            const tiny = 30;
-            routes.forEach(function(route) {
-                const p = route.points;
-                if (p.length < 4) return;
-                [ { end: 0, bend: 1, before: 2, box: boxes[route.edge.sources[0]] }, { end: p.length - 1, bend: p.length - 2, before: p.length - 3, box: boxes[route.edge.targets[0]] } ].forEach(function(e) {
-                    const box = e.box;
-                    if (box === undefined) return;
-                    const end = p[e.end];
-                    const bend = p[e.bend];
-                    const before = p[e.before];
-                    const vertical = Math.abs(end.x - bend.x) < 1;
-                    const jog = vertical ? Math.abs(bend.x - before.x) : Math.abs(bend.y - before.y);
-                    const jogIsPerpendicular = vertical ? Math.abs(bend.y - before.y) < 1 : Math.abs(bend.x - before.x) < 1;
-                    if (jog === 0 || jog >= tiny || !jogIsPerpendicular) return;
+        // removes a sideways jog next to an element (end -> bend -> short sideways step -> bend), by sliding the end of
+        // the line along the element's side, when there's room for it there and the line doesn't then cross an element
+        const removeJogs = function(routes, boxes) {
+            const maxJog = 80;
+            const margin = 30;
+            const gap = 40;
+            const leaves = leafBoxes(boxes);
+            const isVertical = function(a, b) { return Math.abs(a.x - b.x) < 1; };
+            const isHorizontal = function(a, b) { return Math.abs(a.y - b.y) < 1; };
 
-                    const position = vertical ? before.x : before.y;
-                    const min = (vertical ? box.x : box.y) + 10;
-                    const max = (vertical ? box.x + box.width : box.y + box.height) - 10;
-                    if (position < min || position > max) return;
-
-                    // keep clear of the other lines on the same element
-                    const clear = routes.every(function(other) {
-                        if (other === route) return true;
-                        return [ other.points[0], other.points[other.points.length - 1] ].every(function(point) {
-                            const sameSide = vertical ? Math.abs(point.y - end.y) < 2 : Math.abs(point.x - end.x) < 2;
-                            return !sameSide || Math.abs((vertical ? point.x : point.y) - position) >= 20;
-                        });
-                    });
-                    if (!clear) return;
-
-                    if (vertical) {
-                        end.x = position;
-                        bend.x = position;
-                    } else {
-                        end.y = position;
-                        bend.y = position;
+            const crossesElement = function(a, b, except) {
+                return leaves.some(function(box) {
+                    if (except.indexOf(box) > -1) return false;
+                    if (isVertical(a, b)) {
+                        return a.x > box.x - 5 && a.x < box.x + box.width + 5 && Math.max(a.y, b.y) > box.y && Math.min(a.y, b.y) < box.y + box.height;
                     }
+                    return a.y > box.y - 5 && a.y < box.y + box.height + 5 && Math.max(a.x, b.x) > box.x && Math.min(a.x, b.x) < box.x + box.width;
                 });
-            });
+            };
+
+            const endsOn = function(id, except) {
+                const points = [];
+                routes.forEach(function(route) {
+                    if (route === except) return;
+                    if (route.edge.sources[0] === id) points.push(route.points[0]);
+                    if (route.edge.targets[0] === id) points.push(route.points[route.points.length - 1]);
+                });
+                return points;
+            };
+
+            // removes duplicate points, and points in the middle of a straight line
+            const simplify = function(points) {
+                const unique = [ points[0] ];
+                for (var i = 1; i < points.length; i++) {
+                    const last = unique[unique.length - 1];
+                    if (Math.abs(last.x - points[i].x) >= 1 || Math.abs(last.y - points[i].y) >= 1) unique.push(points[i]);
+                }
+                const result = [ unique[0] ];
+                for (var j = 1; j < unique.length - 1; j++) {
+                    const a = result[result.length - 1];
+                    const b = unique[j];
+                    const c = unique[j + 1];
+                    if ((isVertical(a, b) && isVertical(b, c)) || (isHorizontal(a, b) && isHorizontal(b, c))) continue;
+                    result.push(b);
+                }
+                result.push(unique[unique.length - 1]);
+                return result;
+            };
+
+            for (var round = 0; round < 10; round++) {
+                const candidates = [];
+                routes.forEach(function(route) {
+                    const p = route.points;
+                    if (p.length < 4) return;
+                    [ { id: route.edge.sources[0], i: [ 0, 1, 2, 3 ] }, { id: route.edge.targets[0], i: [ p.length - 1, p.length - 2, p.length - 3, p.length - 4 ] } ].forEach(function(end) {
+                        const e = p[end.i[0]], b1 = p[end.i[1]], b2 = p[end.i[2]], next = p[end.i[3]];
+                        const vertical = isVertical(e, b1);
+                        const zShaped = vertical ? (isHorizontal(b1, b2) && isVertical(b2, next)) : (isVertical(b1, b2) && isHorizontal(b2, next));
+                        if (!zShaped) return;
+                        const jog = vertical ? Math.abs(b1.x - b2.x) : Math.abs(b1.y - b2.y);
+                        if (jog < maxJog) {
+                            candidates.push({ route: route, id: end.id, i: end.i, vertical: vertical, jog: jog });
+                        }
+                    });
+                });
+                candidates.sort(function(a, b) { return a.jog - b.jog; });
+
+                const changed = candidates.some(function(c) {
+                    const p = c.route.points;
+                    const box = boxes[c.id];
+                    if (box === undefined) return false;
+                    const position = c.vertical ? p[c.i[2]].x : p[c.i[2]].y;
+                    const min = (c.vertical ? box.x : box.y) + margin;
+                    const max = (c.vertical ? box.x + box.width : box.y + box.height) - margin;
+                    if (position < min || position > max) return false;
+
+                    const e = p[c.i[0]];
+                    const tooClose = endsOn(c.id, c.route).some(function(point) {
+                        const sameSide = c.vertical ? Math.abs(point.y - e.y) < 2 : Math.abs(point.x - e.x) < 2;
+                        return sameSide && Math.abs((c.vertical ? point.x : point.y) - position) < gap;
+                    });
+                    if (tooClose) return false;
+
+                    const newEnd = c.vertical ? { x: position, y: e.y } : { x: e.x, y: position };
+                    if (crossesElement(newEnd, p[c.i[2]], [ boxes[c.route.edge.sources[0]], boxes[c.route.edge.targets[0]] ])) return false;
+
+                    p[c.i[0]] = newEnd;
+                    p[c.i[1]] = { x: newEnd.x, y: newEnd.y };
+                    c.route.points = simplify(p);
+                    return true;
+                });
+                if (!changed) break;
+            }
         };
 
         // a line that runs along the border of a boundary is moved outwards, away from that border
@@ -7615,185 +7665,17 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             }).map(function(id) { return boxes[id]; });
         };
 
-        // fewer bends is better, a line through a label is much worse, and crossings only matter a little
-        const score = function(extracted) {
-            const routes = extracted.routes;
-            var bends = 0;
-            var crossings = 0;
-            const segments = routes.map(function(route) {
-                bends += route.points.length - 2;
-                const result = [];
-                for (var i = 1; i < route.points.length; i++) {
-                    result.push([ route.points[i - 1], route.points[i] ]);
-                }
-                return result;
-            });
-
-            for (var a = 0; a < segments.length; a++) {
-                for (var b = a + 1; b < segments.length; b++) {
-                    segments[a].forEach(function(s1) {
-                        segments[b].forEach(function(s2) {
-                            const s1Vertical = Math.abs(s1[0].x - s1[1].x) < 1;
-                            const s2Vertical = Math.abs(s2[0].x - s2[1].x) < 1;
-                            if (s1Vertical === s2Vertical) return;
-                            const v = s1Vertical ? s1 : s2;
-                            const h = s1Vertical ? s2 : s1;
-                            const x = v[0].x;
-                            const y = h[0].y;
-                            if (x > Math.min(h[0].x, h[1].x) + 1 && x < Math.max(h[0].x, h[1].x) - 1 &&
-                                y > Math.min(v[0].y, v[1].y) + 1 && y < Math.max(v[0].y, v[1].y) - 1) {
-                                crossings++;
-                            }
-                        });
-                    });
-                }
-            }
-
-            // lines running along the border of a boundary are hard to follow
-            var alongBorders = 0;
-            const borders = boundaryBorders(extracted.boxes);
-            segments.forEach(function(routeSegments) {
-                routeSegments.forEach(function(segment) {
-                    borders.forEach(function(border) {
-                        for (var j = 1; j < border.points.length; j++) {
-                            const a = border.points[j - 1];
-                            const b = border.points[j];
-                            const vertical = Math.abs(a.x - b.x) < 1;
-                            const segmentVertical = Math.abs(segment[0].x - segment[1].x) < 1;
-                            if (vertical !== segmentVertical) continue;
-                            if (vertical) {
-                                if (Math.abs(a.x - segment[0].x) < 10 && Math.min(Math.max(a.y, b.y), Math.max(segment[0].y, segment[1].y)) - Math.max(Math.min(a.y, b.y), Math.min(segment[0].y, segment[1].y)) > 10) alongBorders++;
-                            } else {
-                                if (Math.abs(a.y - segment[0].y) < 10 && Math.min(Math.max(a.x, b.x), Math.max(segment[0].x, segment[1].x)) - Math.max(Math.min(a.x, b.x), Math.min(segment[0].x, segment[1].x)) > 10) alongBorders++;
-                            }
-                        }
-                    });
-                });
-            });
-
-            const labelConflicts = placeLabels(routes, leafBoxes(extracted.boxes), borders);
-
-            return bends + (labelConflicts * 20) + (alongBorders * 20) + (crossings * 2);
-        };
-
-        // other ways a relationship could leave/arrive: L-shapes, and side-to-side
-        const alternativeSides = function(side, s, t) {
-            if (side.source === 'SOUTH' || side.source === 'NORTH') {
-                const h = (t.x + (t.width / 2)) >= (s.x + (s.width / 2)) ? [ 'EAST', 'WEST' ] : [ 'WEST', 'EAST' ];
-                return [ { source: side.source, target: h[1] }, { source: h[0], target: side.target }, { source: h[0], target: h[1] } ];
-            } else {
-                const v = (t.y + (t.height / 2)) >= (s.y + (s.height / 2)) ? [ 'SOUTH', 'NORTH' ] : [ 'NORTH', 'SOUTH' ];
-                return [ { source: side.source, target: v[1] }, { source: v[0], target: side.target }, { source: v[0], target: v[1] } ];
-            }
-        };
-
-        // the sides chosen for a view are remembered, so that the (relatively slow) search only happens once
-        const hash = function(text) {
-            // cyrb53 (public domain)
-            var h1 = 0xdeadbeef, h2 = 0x41c6ce57;
-            for (var i = 0; i < text.length; i++) {
-                const ch = text.charCodeAt(i);
-                h1 = Math.imul(h1 ^ ch, 2654435761);
-                h2 = Math.imul(h2 ^ ch, 1597334677);
-            }
-            h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-            h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-            return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
-        };
-        const cacheKey = 'structurizr/autolayout/elk/v3/' + hash(JSON.stringify(buildElkGraph(undefined), function(key, value) {
-            return key === 'cell' ? undefined : value;
-        }));
-        const readCache = function() {
-            try {
-                const value = elkSidesCache[cacheKey] || window.sessionStorage.getItem(cacheKey);
-                return value ? (typeof value === 'string' ? JSON.parse(value) : value) : undefined;
-            } catch (e) {
-                return elkSidesCache[cacheKey];
-            }
-        };
-        const writeCache = function(sides) {
-            elkSidesCache[cacheKey] = sides;
-            try {
-                window.sessionStorage.setItem(cacheKey, JSON.stringify(sides));
-            } catch (e) {
-                // ignore
-            }
-        };
-
-        // finds the sides that give the fewest crossings and bends, within a time budget
-        const searchBudgetInMilliseconds = 1500;
-        const optimiseSides = function(elk, boxes) {
-            const start = Date.now();
-            portOrderBoxes = boxes;
-            const evaluate = function(sides) {
-                return elk.layout(buildElkGraph(sides)).then(function(result) {
-                    return { sides: sides, result: result, score: score(extractRoutes(result)) };
-                });
-            };
-
-            const cached = readCache();
-            if (cached !== undefined) {
-                return evaluate(cached).then(function(best) { return best.result; });
-            }
-
-            var best;
-            const edgeIds = edges.map(function(edge) { return edge.id; });
-            const tryAlternatives = function(id) {
-                if (Date.now() - start > searchBudgetInMilliseconds || best.sides[id] === undefined) {
-                    return Promise.resolve(false);
-                }
-
-                const edge = edges.filter(function(e) { return e.id === id; })[0];
-                const candidates = alternativeSides(best.sides[id], boxes[edge.sources[0]], boxes[edge.targets[0]]);
-                const tryCandidate = function(index) {
-                    if (index >= candidates.length || Date.now() - start > searchBudgetInMilliseconds) {
-                        return Promise.resolve(false);
-                    }
-                    const trial = Object.assign({}, best.sides);
-                    trial[id] = candidates[index];
-                    return evaluate(trial).then(function(candidate) {
-                        if (candidate.score < best.score) {
-                            best = candidate;
-                            return true;
-                        }
-                        return tryCandidate(index + 1);
-                    });
-                };
-
-                return tryCandidate(0);
-            };
-
-            const searchPass = function() {
-                var improved = false;
-                return edgeIds.reduce(function(promise, id) {
-                    return promise.then(function() {
-                        return tryAlternatives(id).then(function(result) { improved = improved || result; });
-                    });
-                }, Promise.resolve()).then(function() {
-                    if (improved && Date.now() - start <= searchBudgetInMilliseconds) {
-                        return searchPass();
-                    }
-                });
-            };
-
-            return evaluate(chooseSides(boxes)).then(function(initial) {
-                best = initial;
-                return searchPass();
-            }).then(function() {
-                writeCache(best.sides);
-                return best.result;
-            });
-        };
-
-        // first decide where everything goes, then attach the relationships to the middle of the best sides
-        // (which also lines everything up again)
+        // first decide where everything goes, then attach each relationship to its own point on the most appropriate
+        // sides of its elements (which also lines everything up again)
         const elk = new ELK();
         return elk.layout(buildElkGraph(undefined)).then(function(firstResult) {
             if (renderedView !== currentView) {
                 return undefined;
             }
 
-            return optimiseSides(elk, calculateAbsolutePositions(firstResult).boxes);
+            const boxes = calculateAbsolutePositions(firstResult).boxes;
+            portOrderBoxes = boxes;
+            return elk.layout(buildElkGraph(chooseSides(boxes)));
         }).then(function(result) {
             if (result === undefined || renderedView !== currentView) {
                 // the view changed while the layout was running
@@ -7821,7 +7703,7 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
                     finalBoxes[id] = { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
                 }
             });
-            removeTinyJogs(routes, finalBoxes);
+            removeJogs(routes, finalBoxes);
             moveOffBorders(routes, finalBoxes);
             placeLabels(routes, leafBoxes(finalBoxes), boundaryBorders(finalBoxes));
 
