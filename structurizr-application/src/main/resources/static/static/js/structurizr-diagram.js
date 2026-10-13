@@ -6601,17 +6601,28 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             selectedElements.forEach(function(cellView) { excluded.add(cellView.model.id); });
         }
 
-        const targets = graph.getElements().filter(function(c) {
+        const targetCells = graph.getElements().filter(function(c) {
             return !excluded.has(c.id) && (c.elementInView !== undefined || c.attributes.type === 'structurizr.boundary');
-        }).map(function(c) {
-            return c.getBBox();
         });
+        const targets = targetCells.map(toBox);
+        const spacingTargets = targetCells.filter(function(c) { return c.elementInView !== undefined; }).map(toBox);
 
-        const snapX = findSnap([x, x + (size.width / 2), x + size.width], targets.map(function(b) { return [b.x, b.x + (b.width / 2), b.x + b.width]; }), threshold);
-        const snapY = findSnap([y, y + (size.height / 2), y + size.height], targets.map(function(b) { return [b.y, b.y + (b.height / 2), b.y + b.height]; }), threshold);
+        // 1. alignment (edges/centres)
+        const alignX = findSnap([x, x + (size.width / 2), x + size.width], targets.map(function(b) { return [b.x, b.x + (b.width / 2), b.x + b.width]; }), threshold);
+        const alignY = findSnap([y, y + (size.height / 2), y + size.height], targets.map(function(b) { return [b.y, b.y + (b.height / 2), b.y + b.height]; }), threshold);
 
-        x += snapX ? snapX.delta : 0;
-        y += snapY ? snapY.delta : 0;
+        // 2. equal spacing (same gap as between other elements, or centred between two neighbours)
+        const spaceX = findSpacingSnap({ x: x, y: y + (alignY ? alignY.delta : 0), width: size.width, height: size.height }, spacingTargets, threshold);
+        const spaceY = findSpacingSnap(transpose({ x: x + (alignX ? alignX.delta : 0), y: y, width: size.width, height: size.height }), spacingTargets.map(transpose), threshold);
+
+        // per axis, use whichever snap is closest
+        const useSpaceX = spaceX !== undefined && (alignX === undefined || Math.abs(spaceX.delta) < Math.abs(alignX.delta));
+        const useSpaceY = spaceY !== undefined && (alignY === undefined || Math.abs(spaceY.delta) < Math.abs(alignY.delta));
+        const snapX = useSpaceX ? undefined : alignX;
+        const snapY = useSpaceY ? undefined : alignY;
+
+        x += useSpaceX ? spaceX.delta : (snapX ? snapX.delta : 0);
+        y += useSpaceY ? spaceY.delta : (snapY ? snapY.delta : 0);
 
         const box = { x: x, y: y, width: size.width, height: size.height };
         if (snapX) {
@@ -6622,9 +6633,117 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             const boxes = [box].concat(snapY.targets.map(function(i) { return targets[i]; }));
             addSnapGuide(Math.min.apply(null, boxes.map(function(b) { return b.x; })), snapY.value, Math.max.apply(null, boxes.map(function(b) { return b.x + b.width; })), snapY.value);
         }
+        if (useSpaceX) {
+            spaceX.segments(box).forEach(function(segment) {
+                addSpacingGuide(segment.from, segment.at, segment.to, segment.at, false);
+            });
+        }
+        if (useSpaceY) {
+            spaceY.segments(transpose(box)).forEach(function(segment) {
+                addSpacingGuide(segment.at, segment.from, segment.at, segment.to, true);
+            });
+        }
 
         return { x: x, y: y };
     };
+
+    function toBox(cell) {
+        const bbox = cell.getBBox();
+        return { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
+    }
+
+    function transpose(box) {
+        return { x: box.y, y: box.x, width: box.height, height: box.width };
+    }
+
+    // finds a horizontal position for the box that matches an existing gap between elements (or centres it between
+    // its neighbours); for vertical spacing, call this with transposed boxes
+    function findSpacingSnap(box, targets, threshold) {
+        const overlaps = function(a, b) {
+            return a.y < b.y + b.height && b.y < a.y + a.height;
+        };
+        const middleOfOverlap = function(a, b) {
+            return (Math.max(a.y, b.y) + Math.min(a.y + a.height, b.y + b.height)) / 2;
+        };
+
+        // the gaps between each element and its nearest neighbour to the right
+        const gaps = [];
+        targets.forEach(function(a) {
+            var nearest = undefined;
+            targets.forEach(function(b) {
+                if (b !== a && overlaps(a, b) && b.x >= a.x + a.width && (nearest === undefined || b.x < nearest.x)) {
+                    nearest = b;
+                }
+            });
+            if (nearest !== undefined && nearest.x - (a.x + a.width) > 0) {
+                gaps.push({ size: nearest.x - (a.x + a.width), left: a, right: nearest });
+            }
+        });
+
+        // the dragged box's nearest neighbours on the left and right (in the same row)
+        var left = undefined;
+        var right = undefined;
+        const centre = box.x + (box.width / 2);
+        targets.filter(function(t) { return overlaps(t, box); }).forEach(function(t) {
+            if (t.x + t.width <= centre && (left === undefined || t.x + t.width > left.x + left.width)) {
+                left = t;
+            } else if (t.x >= centre && (right === undefined || t.x < right.x)) {
+                right = t;
+            }
+        });
+
+        var best = undefined;
+        const consider = function(newX, segments) {
+            const delta = newX - box.x;
+            if (Math.abs(delta) <= threshold && (best === undefined || Math.abs(delta) < Math.abs(best.delta))) {
+                best = { delta: delta, segments: segments };
+            }
+        };
+        const gapSegment = function(gap) {
+            return { from: gap.left.x + gap.left.width, to: gap.right.x, at: middleOfOverlap(gap.left, gap.right) };
+        };
+
+        gaps.forEach(function(gap) {
+            if (left !== undefined) {
+                consider(left.x + left.width + gap.size, function(b) {
+                    return [ gapSegment(gap), { from: left.x + left.width, to: b.x, at: middleOfOverlap(left, b) } ];
+                });
+            }
+            if (right !== undefined) {
+                consider(right.x - gap.size - box.width, function(b) {
+                    return [ gapSegment(gap), { from: b.x + b.width, to: right.x, at: middleOfOverlap(right, b) } ];
+                });
+            }
+        });
+
+        if (left !== undefined && right !== undefined) {
+            const space = right.x - (left.x + left.width) - box.width;
+            if (space > 0) {
+                consider(left.x + left.width + (space / 2), function(b) {
+                    return [
+                        { from: left.x + left.width, to: b.x, at: middleOfOverlap(left, b) },
+                        { from: b.x + b.width, to: right.x, at: middleOfOverlap(right, b) }
+                    ];
+                });
+            }
+        }
+
+        return best;
+    }
+
+    // draws a gap marker: a line with end ticks
+    function addSpacingGuide(x1, y1, x2, y2, vertical) {
+        const tick = 6 / scale;
+        const colour = '#e83e8c';
+        addSnapGuide(x1, y1, x2, y2, colour, false, 2);
+        if (vertical) {
+            addSnapGuide(x1 - tick, y1, x1 + tick, y1, colour, false, 2);
+            addSnapGuide(x2 - tick, y2, x2 + tick, y2, colour, false, 2);
+        } else {
+            addSnapGuide(x1, y1 - tick, x1, y1 + tick, colour, false, 2);
+            addSnapGuide(x2, y2 - tick, x2, y2 + tick, colour, false, 2);
+        }
+    }
 
     // finds the smallest adjustment (within the threshold) that lines up one of the dragged element's lines with a target line
     function findSnap(lines, targetLines, threshold) {
@@ -6647,14 +6766,14 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         return best;
     }
 
-    function addSnapGuide(x1, y1, x2, y2) {
+    function addSnapGuide(x1, y1, x2, y2, colour, dashed, width) {
         const layer = paper.getLayerNode('tools');
         if (layer) {
             const line = joint.V('line', {
                 x1: x1, y1: y1, x2: x2, y2: y2,
-                stroke: '#0d6efd',
-                'stroke-width': 1,
-                'stroke-dasharray': '4 3',
+                stroke: colour || '#0d6efd',
+                'stroke-width': width || 1,
+                'stroke-dasharray': dashed === false ? 'none' : '4 3',
                 'vector-effect': 'non-scaling-stroke',
                 'pointer-events': 'none'
             });
