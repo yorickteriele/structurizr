@@ -84,7 +84,6 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
     private static final double PDF_PAGE_HEIGHT = 793;
     private static final double PDF_PAGE_PADDING = 24;
     private static final double PDF_HEADER_HEIGHT = 56;
-    private static final double PDF_FOOTER_HEIGHT = 28;
     private static final Pattern SVG_DIMENSIONS = Pattern.compile("<svg[^>]*?width=\"([\\d.]+)\"[^>]*?height=\"([\\d.]+)\"");
 
     @Override
@@ -178,6 +177,7 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
             view.key = node.path("key").asText();
             view.name = node.path("name").asText(view.key);
             view.description = node.path("description").asText("");
+            view.type = node.path("type").asText("");
             view.content = node.path("content").asText("");
             if (!view.content.startsWith("data:image/")) {
                 continue;
@@ -225,6 +225,22 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
             }
         }
 
+        // pick a single parent per view (the closest level up), so each page gets one breadcrumb trail
+        Map<String,PdfView> primaryParents = new HashMap<>();
+        for (PdfView view : views) {
+            int level = level(view);
+            PdfView best = null;
+            for (PdfView parent : parents.getOrDefault(view.key, Collections.emptySet())) {
+                int parentLevel = level(parent);
+                if (parentLevel < level && (best == null || parentLevel > level(best))) {
+                    best = parent;
+                }
+            }
+            if (best != null) {
+                primaryParents.put(view.key, best);
+            }
+        }
+
         boolean dark = colorScheme == ColorScheme.Dark;
         StringBuilder buf = new StringBuilder();
         buf.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Structurizr</title><style>");
@@ -237,14 +253,15 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
                 .page { width: %spx; height: %spx; padding: %spx; position: relative; overflow: hidden; page-break-after: always; break-after: page; }
                 .page:last-child { page-break-after: auto; break-after: auto; }
                 .header { height: %spx; display: flex; flex-direction: column; justify-content: center; border-bottom: 1px solid %s; }
-                .nav { font-size: 11px; opacity: 0.85; }
-                .nav a { margin-right: 12px; }
+                .breadcrumbs { font-size: 11px; margin-bottom: 4px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; }
+                .breadcrumbs a { overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+                .breadcrumbs a { padding: 2px 8px; border-radius: 10px; background: %s; }
+                .breadcrumbs .separator { margin: 0 4px; opacity: 0.5; }
                 h1 { font-size: 20px; margin: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-                .diagram-area { display: flex; align-items: center; justify-content: center; }
+                .diagram-area { margin-top: 12px; display: flex; align-items: center; justify-content: center; }
                 .diagram { position: relative; }
                 .diagram img { width: 100%%; height: 100%%; display: block; }
                 .diagram a.zoom { position: absolute; display: block; }
-                .footer { position: absolute; left: %spx; right: %spx; bottom: %spx; height: %spx; font-size: 10px; opacity: 0.85; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; padding-top: 8px; }
                 .contents h1 { font-size: 28px; margin-bottom: 8px; }
                 .contents ol { columns: 2; column-gap: 40px; font-size: 13px; padding-left: 20px; }
                 .contents li { margin-bottom: 6px; break-inside: avoid; }
@@ -254,7 +271,7 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
                 dark ? "#111111" : "#ffffff", dark ? "#eeeeee" : "#111111", dark ? "#8ab4f8" : "#1168bd",
                 (int)PDF_PAGE_WIDTH, (int)PDF_PAGE_HEIGHT, (int)PDF_PAGE_PADDING,
                 (int)PDF_HEADER_HEIGHT, dark ? "#444444" : "#dddddd",
-                (int)PDF_PAGE_PADDING, (int)PDF_PAGE_PADDING, (int)PDF_PAGE_PADDING, (int)PDF_FOOTER_HEIGHT));
+                dark ? "#1f2a3a" : "#eaf2fb"));
         buf.append("</style></head><body>");
 
         // contents page
@@ -269,15 +286,22 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
         buf.append("</ol></section>");
 
         double areaWidth = PDF_PAGE_WIDTH - (2 * PDF_PAGE_PADDING);
-        double areaHeight = PDF_PAGE_HEIGHT - (2 * PDF_PAGE_PADDING) - PDF_HEADER_HEIGHT - PDF_FOOTER_HEIGHT;
+        double areaHeight = PDF_PAGE_HEIGHT - (2 * PDF_PAGE_PADDING) - PDF_HEADER_HEIGHT - 12;
 
         for (PdfView view : views) {
             buf.append("<section class=\"page\" id=\"").append(view.anchor).append("\">");
 
-            // header: title + navigation back up the hierarchy
-            buf.append("<div class=\"header\"><div class=\"nav\"><a href=\"#contents\">&#8962; Contents</a>");
-            for (PdfView parent : parents.getOrDefault(view.key, Collections.emptySet())) {
-                buf.append("<a href=\"#").append(parent.anchor).append("\">&#8593; ").append(escape(parent.name)).append("</a>");
+            // header: breadcrumb trail (contents > ... > parent > this view) + title
+            LinkedList<PdfView> trail = new LinkedList<>();
+            PdfView parent = primaryParents.get(view.key);
+            while (parent != null && parent != view && !trail.contains(parent)) {
+                trail.addFirst(parent);
+                parent = primaryParents.get(parent.key);
+            }
+
+            buf.append("<div class=\"header\"><div class=\"breadcrumbs\"><a href=\"#contents\">Contents</a>");
+            for (PdfView crumb : trail) {
+                buf.append("<span class=\"separator\">&#8250;</span><a href=\"#").append(crumb.anchor).append("\">").append(escape(crumb.name)).append("</a>");
             }
             buf.append("</div><h1>").append(escape(view.name)).append("</h1></div>");
 
@@ -303,28 +327,23 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
             }
             buf.append("</div>");
 
-            // footer: text links for everything that can be zoomed into from here
-            buf.append("<div class=\"footer\">");
-            List<String> zoomLinks = new ArrayList<>();
-            for (PdfLink link : view.links) {
-                for (String targetKey : link.views) {
-                    PdfView target = viewsByKey.get(targetKey);
-                    if (target != null) {
-                        zoomLinks.add("<a href=\"#" + target.anchor + "\">&#128269; " + escape(target.name) + "</a>");
-                    }
-                }
-            }
-            if (!zoomLinks.isEmpty()) {
-                buf.append("Zoom in: ").append(String.join(" &nbsp; ", new LinkedHashSet<>(zoomLinks)));
-            }
-            buf.append("</div>");
-
             buf.append("</section>");
         }
 
         buf.append("</body></html>");
 
         return buf.toString();
+    }
+
+    // used to order views in the breadcrumb trail (landscape > context > container > component)
+    private static int level(PdfView view) {
+        return switch (view.type) {
+            case "SystemLandscape" -> 0;
+            case "SystemContext" -> 1;
+            case "Container" -> 2;
+            case "Component" -> 3;
+            default -> 4;
+        };
     }
 
     private static String escape(String s) {
@@ -341,6 +360,7 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
         String key;
         String name;
         String description;
+        String type;
         String content;
         double width;
         double height;

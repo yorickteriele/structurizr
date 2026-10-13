@@ -67,7 +67,6 @@ This writes `workspace.pdf` next to the workspace. Options:
 - **One page per view** (A4 landscape, vector graphics).
 - **Click an element to zoom in**: software systems link to their system context/container
   views, containers link to their component views (same rules as double-clicking in the UI).
-- **Back links** at the top of every page to the views that zoom into it, plus a link to the contents.
-- A "Zoom in" list at the bottom of each page with all reachable child views.
+- **Breadcrumbs** at the top of every page (Contents › Landscape › Context › Containers), each one clickable.
 
 Internal links work in any standard PDF viewer (browser, Acrobat, Preview, etc).
