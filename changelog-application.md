@@ -5,7 +5,7 @@
 ### export
 
 - Adds a `pdf` export format: a single, clickable PDF with a contents page, one page per view, and links to "zoom in" from elements to their child views (and back up again).
-- Automatic layout now uses ELK (layered, orthogonal routing): elements are placed on a grid, relationships are routed with straight/right-angled lines, and labels are placed on the lines. This applies to `autoLayout` views and the "Auto layout" button in the diagram editor. Set the view (or workspace) property `structurizr.autolayout` to `dagre` to use the previous algorithm.
+- Automatic layout now uses ELK (layered, orthogonal routing): elements are placed on a grid, relationships start/end in the middle of an element's side and are routed with as few bends and crossings as possible, and labels are placed on the lines. This applies to `autoLayout` views and the "Auto layout" button in the diagram editor. Set the view (or workspace) property `structurizr.autolayout` to `dagre` to use the previous algorithm.
 - Diagram editor: elements snap to the edges/centres of other elements and to equal spacing while dragging, with guide lines (hold Alt to only snap to the grid).
 - Adds an "Export as PDF" button to the diagram export dialog (local/server).
 - Adds a `Dockerfile` and `docker-compose.yml` (see `docker/README.md`) to build and run Structurizr locally with PDF export support.

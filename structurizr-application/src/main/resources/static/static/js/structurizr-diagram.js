@@ -6575,6 +6575,7 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
     // snap elements to the edges/centres of other elements while dragging (like draw.io), with guide lines;
     // hold the Alt key while dragging to only snap to the grid
     const snapDistanceInPixels = 8;
+    const elkSidesCache = {};
     var snapGuides = [];
 
     if (joint.dia.ElementView.prototype.structurizrSnapInstalled !== true) {
@@ -7202,12 +7203,14 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             'elk.edgeLabels.placement': 'CENTER',
             'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
             'elk.layered.nodePlacement.favorStraightEdges': 'true',
-            'elk.layered.considerModelOrder.strategy': 'NODES_AND_EDGES',
+            // lets relationships attach anywhere along an element's side (without resizing it), so that more of them can be straight lines
+            'elk.layered.nodePlacement.networkSimplex.nodeFlexibility.default': 'PORT_POSITION',
             'elk.layered.thoroughness': '20'
         };
 
         // build the ELK graph: elements are nodes, boundaries/groups/deployment nodes are compound nodes
-        const nodesById = {};
+        var nodesById = {};
+        var portSides = undefined;
         const toElkNode = function(cell) {
             const children = cell.getEmbeddedCells().filter(function(c) { return c.isElement() && isLaidOut(c); });
             const size = cell.size();
@@ -7222,6 +7225,30 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             } else {
                 node.width = size.width;
                 node.height = size.height;
+
+                if (portSides !== undefined) {
+                    // relationships start/end in the middle of a side
+                    const sidesUsed = {};
+                    edges.forEach(function(edge) {
+                        if (portSides[edge.id] === undefined) return;
+                        if (edge.sources[0] === node.id) sidesUsed[portSides[edge.id].source] = true;
+                        if (edge.targets[0] === node.id) sidesUsed[portSides[edge.id].target] = true;
+                    });
+                    // for people/robots, the sides are attached to the middle of the body rather than the whole shape (which includes the head)
+                    const type = ('' + cell.get('type')).toLowerCase();
+                    const sideY = (type.indexOf('person') > -1 || type.indexOf('robot') > -1) ? size.height * (300 / 450) : size.height / 2;
+                    node.ports = Object.keys(sidesUsed).map(function(side) {
+                        return {
+                            id: portId(node.id, side),
+                            width: 0,
+                            height: 0,
+                            x: (side === 'NORTH' || side === 'SOUTH') ? size.width / 2 : (side === 'EAST' ? size.width : 0),
+                            y: (side === 'EAST' || side === 'WEST') ? sideY : (side === 'SOUTH' ? size.height : 0),
+                            layoutOptions: { 'elk.port.side': side }
+                        };
+                    });
+                    node.layoutOptions = { 'elk.portConstraints': 'FIXED_POS' };
+                }
             }
             nodesById[node.id] = node;
 
@@ -7258,41 +7285,83 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             }
         });
 
-        const elkGraph = {
-            id: 'root',
-            layoutOptions: Object.assign({
-                'elk.algorithm': 'layered',
-                'elk.hierarchyHandling': 'INCLUDE_CHILDREN'
-            }, layoutOptions),
-            children: roots.map(toElkNode),
-            edges: edges.map(function(edge) {
-                return { id: edge.id, sources: edge.sources, targets: edge.targets, labels: edge.labels };
-            })
+        const portId = function(nodeId, side) {
+            return nodeId + '_' + side;
         };
 
-        return new ELK().layout(elkGraph).then(function(result) {
-            if (renderedView !== currentView) {
-                // the view changed while the layout was running
-                return;
-            }
+        const buildElkGraph = function(sides) {
+            nodesById = {};
+            portSides = sides;
 
-            // ELK coordinates are relative to the parent node, so work out absolute positions first
-            const absolute = { root: { x: 0, y: 0 } };
-            const parents = {};
-            const calculateAbsolutePositions = function(node, parent) {
-                const parentPosition = absolute[parent.id];
-                absolute[node.id] = { x: parentPosition.x + (node.x || 0), y: parentPosition.y + (node.y || 0) };
-                parents[node.id] = parent.id;
-                (node.children || []).forEach(function(child) { calculateAbsolutePositions(child, node); });
+            return {
+                id: 'root',
+                layoutOptions: Object.assign({
+                    'elk.algorithm': 'layered',
+                    'elk.hierarchyHandling': 'INCLUDE_CHILDREN'
+                }, layoutOptions),
+                children: roots.map(toElkNode),
+                edges: edges.map(function(edge) {
+                    const side = sides !== undefined ? sides[edge.id] : undefined;
+                    return {
+                        id: edge.id,
+                        sources: [ side && nodesById[edge.sources[0]].ports ? portId(edge.sources[0], side.source) : edge.sources[0] ],
+                        targets: [ side && nodesById[edge.targets[0]].ports ? portId(edge.targets[0], side.target) : edge.targets[0] ],
+                        labels: edge.labels
+                    };
+                })
             };
-            result.children.forEach(function(child) { calculateAbsolutePositions(child, result); });
+        };
 
+        // ELK coordinates are relative to the parent node, so work out absolute positions
+        const calculateAbsolutePositions = function(result) {
+            const layout = { absolute: { root: { x: 0, y: 0 } }, parents: {}, boxes: {} };
+            const walk = function(node, parent) {
+                const parentPosition = layout.absolute[parent.id];
+                layout.absolute[node.id] = { x: parentPosition.x + (node.x || 0), y: parentPosition.y + (node.y || 0) };
+                layout.parents[node.id] = parent.id;
+                layout.boxes[node.id] = { x: layout.absolute[node.id].x, y: layout.absolute[node.id].y, width: node.width, height: node.height };
+                (node.children || []).forEach(function(child) { walk(child, node); });
+            };
+            result.children.forEach(function(child) { walk(child, result); });
+
+            return layout;
+        };
+
+        // picks the sides of the elements that each relationship leaves/arrives at, based on where the elements are
+        const chooseSides = function(boxes) {
+            const sides = {};
+            edges.forEach(function(edge) {
+                const s = boxes[edge.sources[0]];
+                const t = boxes[edge.targets[0]];
+                if (s === undefined || t === undefined) return;
+
+                const horizontalGap = Math.max(t.x - (s.x + s.width), s.x - (t.x + t.width));
+                const verticalGap = Math.max(t.y - (s.y + s.height), s.y - (t.y + t.height));
+                const vertical = (direction === 'DOWN' || direction === 'UP') ?
+                    (verticalGap > 0 || horizontalGap <= 0) :
+                    !(horizontalGap > 0 || verticalGap <= 0);
+
+                if (vertical) {
+                    const below = (t.y + (t.height / 2)) >= (s.y + (s.height / 2));
+                    sides[edge.id] = below ? { source: 'SOUTH', target: 'NORTH' } : { source: 'NORTH', target: 'SOUTH' };
+                } else {
+                    const right = (t.x + (t.width / 2)) >= (s.x + (s.width / 2));
+                    sides[edge.id] = right ? { source: 'EAST', target: 'WEST' } : { source: 'WEST', target: 'EAST' };
+                }
+            });
+
+            return sides;
+        };
+
+        // works out the absolute route (and label position) of every relationship in an ELK result
+        const extractRoutes = function(result) {
+            const layout = calculateAbsolutePositions(result);
             const ancestorsOf = function(id) {
                 const ancestors = [];
-                var parentId = parents[id];
+                var parentId = layout.parents[id];
                 while (parentId !== undefined) {
                     ancestors.push(parentId);
-                    parentId = parents[parentId];
+                    parentId = layout.parents[parentId];
                 }
                 return ancestors;
             };
@@ -7315,6 +7384,198 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
                 return 'root';
             };
 
+            const edgesById = {};
+            edges.forEach(function(edge) { edgesById[edge.id] = edge; });
+
+            const routes = [];
+            const collectRoutes = function(node) {
+                (node.edges || []).forEach(function(resultEdge) {
+                    const edge = edgesById[resultEdge.id];
+                    if (edge === undefined || resultEdge.sections === undefined || resultEdge.sections.length === 0) {
+                        return;
+                    }
+
+                    const offset = layout.absolute[edgeContainer(edge.sources[0], edge.targets[0])] || { x: 0, y: 0 };
+                    const section = resultEdge.sections[0];
+                    const resultLabel = (resultEdge.labels && resultEdge.labels.length > 0) ? resultEdge.labels[0] : undefined;
+                    routes.push({
+                        edge: edge,
+                        label: resultLabel ? { x: resultLabel.x + offset.x, y: resultLabel.y + offset.y, width: resultLabel.width, height: resultLabel.height } : undefined,
+                        points: [ section.startPoint ].concat(section.bendPoints || []).concat([ section.endPoint ]).map(function(p) {
+                            return { x: p.x + offset.x, y: p.y + offset.y };
+                        })
+                    });
+                });
+                (node.children || []).forEach(collectRoutes);
+            };
+            collectRoutes(result);
+
+            return { absolute: layout.absolute, boxes: layout.boxes, routes: routes };
+        };
+
+        // the fewer crossings and bends, the better (a crossing is much worse than a bend)
+        const score = function(routes) {
+            var bends = 0;
+            var crossings = 0;
+            const segments = routes.map(function(route) {
+                bends += route.points.length - 2;
+                const result = [];
+                for (var i = 1; i < route.points.length; i++) {
+                    result.push([ route.points[i - 1], route.points[i] ]);
+                }
+                return result;
+            });
+
+            for (var a = 0; a < segments.length; a++) {
+                for (var b = a + 1; b < segments.length; b++) {
+                    segments[a].forEach(function(s1) {
+                        segments[b].forEach(function(s2) {
+                            const s1Vertical = Math.abs(s1[0].x - s1[1].x) < 1;
+                            const s2Vertical = Math.abs(s2[0].x - s2[1].x) < 1;
+                            if (s1Vertical === s2Vertical) return;
+                            const v = s1Vertical ? s1 : s2;
+                            const h = s1Vertical ? s2 : s1;
+                            const x = v[0].x;
+                            const y = h[0].y;
+                            if (x > Math.min(h[0].x, h[1].x) + 1 && x < Math.max(h[0].x, h[1].x) - 1 &&
+                                y > Math.min(v[0].y, v[1].y) + 1 && y < Math.max(v[0].y, v[1].y) - 1) {
+                                crossings++;
+                            }
+                        });
+                    });
+                }
+            }
+
+            return (crossings * 10) + bends;
+        };
+
+        // other ways a relationship could leave/arrive: L-shapes, and side-to-side
+        const alternativeSides = function(side, s, t) {
+            if (side.source === 'SOUTH' || side.source === 'NORTH') {
+                const h = (t.x + (t.width / 2)) >= (s.x + (s.width / 2)) ? [ 'EAST', 'WEST' ] : [ 'WEST', 'EAST' ];
+                return [ { source: side.source, target: h[1] }, { source: h[0], target: side.target }, { source: h[0], target: h[1] } ];
+            } else {
+                const v = (t.y + (t.height / 2)) >= (s.y + (s.height / 2)) ? [ 'SOUTH', 'NORTH' ] : [ 'NORTH', 'SOUTH' ];
+                return [ { source: side.source, target: v[1] }, { source: v[0], target: side.target }, { source: v[0], target: v[1] } ];
+            }
+        };
+
+        // the sides chosen for a view are remembered, so that the (relatively slow) search only happens once
+        const hash = function(text) {
+            // cyrb53 (public domain)
+            var h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+            for (var i = 0; i < text.length; i++) {
+                const ch = text.charCodeAt(i);
+                h1 = Math.imul(h1 ^ ch, 2654435761);
+                h2 = Math.imul(h2 ^ ch, 1597334677);
+            }
+            h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+            h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+            return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+        };
+        const cacheKey = 'structurizr/autolayout/elk/' + hash(JSON.stringify(buildElkGraph(undefined), function(key, value) {
+            return key === 'cell' ? undefined : value;
+        }));
+        const readCache = function() {
+            try {
+                const value = elkSidesCache[cacheKey] || window.sessionStorage.getItem(cacheKey);
+                return value ? (typeof value === 'string' ? JSON.parse(value) : value) : undefined;
+            } catch (e) {
+                return elkSidesCache[cacheKey];
+            }
+        };
+        const writeCache = function(sides) {
+            elkSidesCache[cacheKey] = sides;
+            try {
+                window.sessionStorage.setItem(cacheKey, JSON.stringify(sides));
+            } catch (e) {
+                // ignore
+            }
+        };
+
+        // finds the sides that give the fewest crossings and bends, within a time budget
+        const searchBudgetInMilliseconds = 1500;
+        const optimiseSides = function(elk, boxes) {
+            const start = Date.now();
+            const evaluate = function(sides) {
+                return elk.layout(buildElkGraph(sides)).then(function(result) {
+                    return { sides: sides, result: result, score: score(extractRoutes(result).routes) };
+                });
+            };
+
+            const cached = readCache();
+            if (cached !== undefined) {
+                return evaluate(cached).then(function(best) { return best.result; });
+            }
+
+            var best;
+            const edgeIds = edges.map(function(edge) { return edge.id; });
+            const tryAlternatives = function(id) {
+                if (Date.now() - start > searchBudgetInMilliseconds || best.sides[id] === undefined) {
+                    return Promise.resolve(false);
+                }
+
+                const edge = edges.filter(function(e) { return e.id === id; })[0];
+                const candidates = alternativeSides(best.sides[id], boxes[edge.sources[0]], boxes[edge.targets[0]]);
+                const tryCandidate = function(index) {
+                    if (index >= candidates.length || Date.now() - start > searchBudgetInMilliseconds) {
+                        return Promise.resolve(false);
+                    }
+                    const trial = Object.assign({}, best.sides);
+                    trial[id] = candidates[index];
+                    return evaluate(trial).then(function(candidate) {
+                        if (candidate.score < best.score) {
+                            best = candidate;
+                            return true;
+                        }
+                        return tryCandidate(index + 1);
+                    });
+                };
+
+                return tryCandidate(0);
+            };
+
+            const searchPass = function() {
+                var improved = false;
+                return edgeIds.reduce(function(promise, id) {
+                    return promise.then(function() {
+                        return tryAlternatives(id).then(function(result) { improved = improved || result; });
+                    });
+                }, Promise.resolve()).then(function() {
+                    if (improved && Date.now() - start <= searchBudgetInMilliseconds) {
+                        return searchPass();
+                    }
+                });
+            };
+
+            return evaluate(chooseSides(boxes)).then(function(initial) {
+                best = initial;
+                return searchPass();
+            }).then(function() {
+                writeCache(best.sides);
+                return best.result;
+            });
+        };
+
+        // first decide where everything goes, then attach the relationships to the middle of the best sides
+        // (which also lines everything up again)
+        const elk = new ELK();
+        return elk.layout(buildElkGraph(undefined)).then(function(firstResult) {
+            if (renderedView !== currentView) {
+                return undefined;
+            }
+
+            return optimiseSides(elk, calculateAbsolutePositions(firstResult).boxes);
+        }).then(function(result) {
+            if (result === undefined || renderedView !== currentView) {
+                // the view changed while the layout was running
+                return;
+            }
+
+            const extracted = extractRoutes(result);
+            const absolute = extracted.absolute;
+            const routes = extracted.routes;
+
             // 1. position the leaf elements (boundaries are resized around their contents automatically)
             Object.keys(nodesById).forEach(function(id) {
                 const node = nodesById[id];
@@ -7325,32 +7586,15 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             repositionAllParentCells();
 
             // 2. route each relationship along the orthogonal path calculated by ELK, with its label where ELK put it
-            const edgesById = {};
-            edges.forEach(function(edge) { edgesById[edge.id] = edge; });
-            const resultEdges = [];
-            const collectEdges = function(node) {
-                (node.edges || []).forEach(function(e) { resultEdges.push(e); });
-                (node.children || []).forEach(collectEdges);
-            };
-            collectEdges(result);
-
-            resultEdges.forEach(function(resultEdge) {
-                const edge = edgesById[resultEdge.id];
-                if (edge === undefined || resultEdge.sections === undefined || resultEdge.sections.length === 0) {
-                    return;
-                }
-
-                const offset = absolute[edgeContainer(edge.sources[0], edge.targets[0])] || { x: 0, y: 0 };
-                const section = resultEdge.sections[0];
-                const points = [ section.startPoint ].concat(section.bendPoints || []).concat([ section.endPoint ]);
-                const link = edge.link;
+            routes.forEach(function(route) {
+                const link = route.edge.link;
 
                 // ELK's route is already orthogonal, so draw straight segments between its points (the orthogonal router would re-route it)
                 link.unset('router');
                 if (editable && link.relationshipInView) {
                     link.relationshipInView.routing = 'Direct';
                 }
-                const vertices = points.map(function(p) { return { x: Math.round(p.x + offset.x), y: Math.round(p.y + offset.y) }; });
+                const vertices = route.points.map(function(p) { return { x: Math.round(p.x), y: Math.round(p.y) }; });
 
                 // ELK's start/end points are on the element borders; nudge them slightly outwards (along the line),
                 // so that JointJS can always find where the line meets the element
@@ -7373,12 +7617,35 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
                 link.prop('source/anchor', { name: 'perpendicular' });
                 link.prop('target/anchor', { name: 'perpendicular' });
 
-                if (resultEdge.labels && resultEdge.labels.length > 0) {
-                    const label = resultEdge.labels[0];
+                if (route.label) {
                     const linkView = paper.findViewByModel(link);
                     const totalLength = linkView.getConnectionLength();
                     if (totalLength > 0) {
-                        const centre = { x: offset.x + label.x + (label.width / 2), y: offset.y + label.y + (label.height / 2) };
+                        // the label goes in the middle of the longest straight segment running in the layout direction
+                        // (that's where ELK left room for labels), or otherwise the longest segment
+                        const verticalLayout = (direction === 'DOWN' || direction === 'UP');
+                        var longest = 0;
+                        var longestInDirection = 0;
+                        var centre = undefined;
+                        var centreInDirection = undefined;
+                        for (var i = 1; i < route.points.length; i++) {
+                            const a = route.points[i - 1];
+                            const b = route.points[i];
+                            const length = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+                            const middle = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+                            const inDirection = verticalLayout ? Math.abs(a.x - b.x) < 1 : Math.abs(a.y - b.y) < 1;
+                            if (length > longest) {
+                                longest = length;
+                                centre = middle;
+                            }
+                            if (inDirection && length > longestInDirection) {
+                                longestInDirection = length;
+                                centreInDirection = middle;
+                            }
+                        }
+                        if (centreInDirection !== undefined && longestInDirection >= 100) {
+                            centre = centreInDirection;
+                        }
                         const distance = Math.min(0.95, Math.max(0.05, linkView.getClosestPointLength(centre) / totalLength));
                         const labels = JSON.parse(JSON.stringify(link.get('labels')));
                         labels.forEach(function(l) {
