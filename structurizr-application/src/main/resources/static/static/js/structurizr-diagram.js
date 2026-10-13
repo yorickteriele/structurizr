@@ -6568,6 +6568,110 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         return linksBetweenElements;
     }
 
+    // snap elements to the edges/centres of other elements while dragging (like draw.io), with guide lines;
+    // hold the Alt key while dragging to only snap to the grid
+    const snapDistanceInPixels = 8;
+    var snapGuides = [];
+
+    if (joint.dia.ElementView.prototype.structurizrSnapInstalled !== true) {
+        const snapToGridOriginal = joint.dia.ElementView.prototype.snapToGrid;
+        joint.dia.ElementView.prototype.snapToGrid = function(evt, x, y) {
+            const position = snapToGridOriginal.call(this, evt, x, y);
+            if (this.paper && this.paper.structurizrSnapToElements && !(evt && evt.altKey)) {
+                return this.paper.structurizrSnapToElements(this, position.x, position.y);
+            }
+
+            return position;
+        };
+        joint.dia.ElementView.prototype.structurizrSnapInstalled = true;
+    }
+
+    paper.structurizrSnapToElements = function(elementView, x, y) {
+        removeSnapGuides();
+
+        const cell = elementView.model;
+        const size = cell.size();
+        const threshold = snapDistanceInPixels / scale;
+
+        // don't snap to the element itself, anything inside/around it, or other elements being dragged with it
+        const excluded = new Set([cell.id]);
+        cell.getEmbeddedCells({ deep: true }).forEach(function(c) { excluded.add(c.id); });
+        cell.getAncestors().forEach(function(c) { excluded.add(c.id); });
+        if (elementView.selected === true) {
+            selectedElements.forEach(function(cellView) { excluded.add(cellView.model.id); });
+        }
+
+        const targets = graph.getElements().filter(function(c) {
+            return !excluded.has(c.id) && (c.elementInView !== undefined || c.attributes.type === 'structurizr.boundary');
+        }).map(function(c) {
+            return c.getBBox();
+        });
+
+        const snapX = findSnap([x, x + (size.width / 2), x + size.width], targets.map(function(b) { return [b.x, b.x + (b.width / 2), b.x + b.width]; }), threshold);
+        const snapY = findSnap([y, y + (size.height / 2), y + size.height], targets.map(function(b) { return [b.y, b.y + (b.height / 2), b.y + b.height]; }), threshold);
+
+        x += snapX ? snapX.delta : 0;
+        y += snapY ? snapY.delta : 0;
+
+        const box = { x: x, y: y, width: size.width, height: size.height };
+        if (snapX) {
+            const boxes = [box].concat(snapX.targets.map(function(i) { return targets[i]; }));
+            addSnapGuide(snapX.value, Math.min.apply(null, boxes.map(function(b) { return b.y; })), snapX.value, Math.max.apply(null, boxes.map(function(b) { return b.y + b.height; })));
+        }
+        if (snapY) {
+            const boxes = [box].concat(snapY.targets.map(function(i) { return targets[i]; }));
+            addSnapGuide(Math.min.apply(null, boxes.map(function(b) { return b.x; })), snapY.value, Math.max.apply(null, boxes.map(function(b) { return b.x + b.width; })), snapY.value);
+        }
+
+        return { x: x, y: y };
+    };
+
+    // finds the smallest adjustment (within the threshold) that lines up one of the dragged element's lines with a target line
+    function findSnap(lines, targetLines, threshold) {
+        var best = undefined;
+        targetLines.forEach(function(candidates, targetIndex) {
+            lines.forEach(function(line) {
+                candidates.forEach(function(candidate) {
+                    const delta = candidate - line;
+                    if (Math.abs(delta) <= threshold) {
+                        if (best === undefined || Math.abs(delta) < Math.abs(best.delta) - 0.01) {
+                            best = { delta: delta, value: candidate, targets: [ targetIndex ] };
+                        } else if (Math.abs(delta - best.delta) < 0.01 && best.targets.indexOf(targetIndex) === -1) {
+                            best.targets.push(targetIndex);
+                        }
+                    }
+                });
+            });
+        });
+
+        return best;
+    }
+
+    function addSnapGuide(x1, y1, x2, y2) {
+        const layer = paper.getLayerNode('tools');
+        if (layer) {
+            const line = joint.V('line', {
+                x1: x1, y1: y1, x2: x2, y2: y2,
+                stroke: '#0d6efd',
+                'stroke-width': 1,
+                'stroke-dasharray': '4 3',
+                'vector-effect': 'non-scaling-stroke',
+                'pointer-events': 'none'
+            });
+            layer.appendChild(line.node);
+            snapGuides.push(line.node);
+        }
+    }
+
+    function removeSnapGuides() {
+        snapGuides.forEach(function(node) {
+            if (node.parentNode) {
+                node.parentNode.removeChild(node);
+            }
+        });
+        snapGuides = [];
+    }
+
     function addPaperEventHandlers() {
         paper.on('cell:mouseover', function (cellView, evt) {
             if (cellView.model.elementInView) {
@@ -6661,6 +6765,8 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         });
 
         paper.on('cell:pointerup', function (cell, evt, x, y) {
+            removeSnapGuides();
+
             if (previousPositions && previousPositions.length > 0) {
                 if (!cell.getConnectionLength) {
                     previousPositions.forEach(function (previousPosition) {
