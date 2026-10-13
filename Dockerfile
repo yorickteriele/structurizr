@@ -19,7 +19,7 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY --from=build /src/structurizr-application/target/structurizr-*.war /usr/local/structurizr.war
 COPY structurizr-themes /usr/local/structurizr-themes
 COPY structurizr-application/Dockerfiles/structurizr.sh /usr/local/structurizr.sh
-RUN chmod +x /usr/local/structurizr.sh
+RUN sed -i "s/\r$//" /usr/local/structurizr.sh && chmod +x /usr/local/structurizr.sh
 
 EXPOSE ${PORT}
 
