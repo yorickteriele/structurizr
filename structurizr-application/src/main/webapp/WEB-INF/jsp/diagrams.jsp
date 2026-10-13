@@ -5,6 +5,7 @@
 <script type="text/javascript" src="/static/js/dagre-1.1.8.js"></script>
 <script type="text/javascript" src="/static/js/graphlib-2.2.4.min.js"></script>
 <script type="text/javascript" src="/static/js/jointjs-DirectedGraph-4.1.3.min.js"></script>
+<script type="text/javascript" src="/static/js/elk-0.9.3.bundled.js"></script>
 
 <%-- creating animated GIFs --%>
 <script type="text/javascript" src="/static/js/gifshot-0.4.4.js"></script>

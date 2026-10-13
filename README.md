@@ -14,6 +14,10 @@ The two quickest ways to get started with the Structurizr tooling are:
 
 [![Structurizr playground](https://docs.structurizr.com/images/playground.png)](https://playground.structurizr.com)
 
+## Export to PDF
+
+Export a workspace to a clickable PDF (click an element to zoom into its child view) with the bundled Docker image - see [docker/README.md](docker/README.md).
+
 ## Documentation
 
 See [docs.structurizr.com](https://docs.structurizr.com) for documentation, getting started guides, tutorials, etc.

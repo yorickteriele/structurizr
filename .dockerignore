@@ -1,0 +1,7 @@
+.git
+.idea
+**/target
+docker/workspace
+Dockerfile
+docker-compose.yml
+.env

@@ -51,6 +51,9 @@
             <div class="modal-footer">
                 <button id="exportSelectedViewsAsSvgButton" type="button" class="btn btn-primary"><img src="/static/bootstrap-icons/filetype-svg.svg" class="icon-btn icon-white" /> Export as SVG</button>
                 <button id="exportSelectedViewsAsPngButton" type="button" class="btn btn-primary"><img src="/static/bootstrap-icons/filetype-png.svg" class="icon-btn icon-white" /> Export as PNG</button>
+                <c:if test="${workspace.id > 0}">
+                <button id="exportSelectedViewsAsPdfButton" type="button" class="btn btn-primary" title="Export to a single PDF, with clickable elements to zoom in (all views are included if fewer than two are selected)"><img src="/static/bootstrap-icons/filetype-pdf.svg" class="icon-btn icon-white" /> Export as PDF</button>
+                </c:if>
             </div>
         </div>
     </div>
@@ -60,6 +63,7 @@
     $('#exportSelectedViewsAsPngButton').click(function() { exportSelectedViews('png'); });
     $('#exportSelectedViewsAsSvgButton').click(function() { exportSelectedViews('svg'); });
     $('#exportAnimatedGIFButton').click(function() { createGIF(); });
+    $('#exportSelectedViewsAsPdfButton').click(function() { exportSelectedViewsAsPdf(); });
 
     $('#exportModal').on('shown.bs.modal', function () {
         structurizr.diagram.setKeyboardShortcutsEnabled(false)
@@ -153,6 +157,72 @@
                 }
             );
         }
+    }
+
+    function exportSelectedViewsAsPdf() {
+        $('#exportedDiagrams').empty();
+        $('#exportAnimation').addClass('hidden');
+
+        var selectedValues = $('#exportViewList').val() || [];
+        if (selectedValues.length < 2) {
+            // a clickable PDF only makes sense with multiple views, so default to all of them
+            selectedValues = views.map(function(view) { return view.key; });
+        }
+
+        const button = $('#exportSelectedViewsAsPdfButton');
+        button.attr('disabled', 'disabled');
+        $('#exportedDiagrams').append($('<div></div>').text('Creating PDF...'));
+
+        const exportedViews = [];
+        const originalView = structurizr.diagram.getCurrentViewOrFilter();
+        structurizr.diagram.exportViews(
+            selectedValues.slice(),
+            {
+                format: 'svg',
+                metadata: $('#exportMetadata').is(':checked') === true,
+                animation: false,
+                crop: false,
+                navigation: true,
+                prefix: ''
+            },
+            function(view, diagram) {
+                exportedViews.push({
+                    key: view.key,
+                    name: structurizr.ui.getTitleForView(view),
+                    description: view.description ? view.description : '',
+                    type: view.type,
+                    content: diagram.content,
+                    links: structurizr.diagram.getNavigationLinks()
+                });
+            },
+            function() {
+                changeView(originalView);
+
+                fetch('/workspace/${workspace.id}/pdf?mode=' + (structurizr.ui.isDarkMode() ? 'dark' : 'light'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(exportedViews)
+                })
+                .then(function(response) {
+                    if (!response.ok) {
+                        throw new Error(response.status === 501 ? 'PDF export is not supported in this build' : 'HTTP ' + response.status);
+                    }
+                    return response.blob();
+                })
+                .then(function(blob) {
+                    const filename = ($('#exportFilenamePrefix').val() || 'structurizr-${workspace.id}') + '.pdf';
+                    const link = $('<a></a>').attr('href', URL.createObjectURL(blob)).attr('download', filename).text(filename);
+                    $('#exportedDiagrams').empty().append(link);
+                    link[0].click();
+                })
+                .catch(function(error) {
+                    $('#exportedDiagrams').empty().append($('<div></div>').text('Error creating PDF: ' + error.message));
+                })
+                .finally(function() {
+                    button.removeAttr('disabled');
+                });
+            }
+        );
     }
 
     function addDiagramExportToPage(view, diagram, diagramKey, download) {

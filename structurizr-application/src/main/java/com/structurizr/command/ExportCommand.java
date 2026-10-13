@@ -38,6 +38,7 @@ public class ExportCommand extends AbstractCommand {
     private static final String STATIC_FORMAT = "static";
     private static final String PNG_FORMAT = "png";
     private static final String SVG_FORMAT = "svg";
+    private static final String PDF_FORMAT = "pdf";
     private static final String CUSTOM_FORMAT = "fqcn";
 
     private static final Map<String,Exporter> EXPORTERS = new HashMap<>();
@@ -74,7 +75,7 @@ public class ExportCommand extends AbstractCommand {
         option.setRequired(false);
         options.addOption(option);
 
-        option = new Option("f", "format", true, String.format("Export format: %s[/%s|%s]|%s|%s|%s|%s|%s|%s", PLANTUML_FORMAT, PLANTUML_STRUCTURIZR_SUBFORMAT, PLANTUML_C4PLANTUML_SUBFORMAT, WEBSEQUENCEDIAGRAMS_FORMAT, MERMAID_FORMAT, JSON_FORMAT, THEME_FORMAT, STATIC_FORMAT, CUSTOM_FORMAT));
+        option = new Option("f", "format", true, String.format("Export format: %s[/%s|%s]|%s|%s|%s|%s|%s|%s|%s|%s|%s", PLANTUML_FORMAT, PLANTUML_STRUCTURIZR_SUBFORMAT, PLANTUML_C4PLANTUML_SUBFORMAT, WEBSEQUENCEDIAGRAMS_FORMAT, MERMAID_FORMAT, JSON_FORMAT, THEME_FORMAT, STATIC_FORMAT, PNG_FORMAT, SVG_FORMAT, PDF_FORMAT, CUSTOM_FORMAT));
         option.setRequired(true);
         options.addOption(option);
 
@@ -82,7 +83,7 @@ public class ExportCommand extends AbstractCommand {
         option.setRequired(false);
         options.addOption(option);
 
-        option = new Option("url", "url", true, "Structurizr diagram page URL (for PNG/SVG exports)");
+        option = new Option("url", "url", true, "Structurizr diagram page URL (for PNG/SVG/PDF exports)");
         option.setRequired(false);
         options.addOption(option);
 
@@ -90,7 +91,7 @@ public class ExportCommand extends AbstractCommand {
         option.setRequired(false);
         options.addOption(option);
 
-        option = new Option("mode", "mode", true, "Rendering mode: light|dark (for PNG/SVG exports)");
+        option = new Option("mode", "mode", true, "Rendering mode: light|dark (for PNG/SVG/PDF exports)");
         option.setRequired(false);
         options.addOption(option);
 
@@ -120,14 +121,11 @@ public class ExportCommand extends AbstractCommand {
             return false;
         }
 
-        if (PNG_FORMAT.equals(format) || SVG_FORMAT.equals(format)) {
+        if (PNG_FORMAT.equals(format) || SVG_FORMAT.equals(format) || PDF_FORMAT.equals(format)) {
             // check the build includes the Playwright exporter
-            PlaywrightExporter playwrightExporter = null;
-            try {
-                Class<?> clazz = Class.forName(PlaywrightExporter.class.getName() + "Impl");
-                playwrightExporter = (PlaywrightExporter)clazz.getDeclaredConstructor().newInstance();
-            } catch (ClassNotFoundException e) {
-                log.fatal("Exporting to PNG/SVG is not supported in this build");
+            PlaywrightExporter playwrightExporter = PlaywrightExporter.create();
+            if (playwrightExporter == null) {
+                log.fatal("Exporting to PNG/SVG/PDF is not supported in this build");
                 return false;
             }
 
@@ -167,7 +165,12 @@ public class ExportCommand extends AbstractCommand {
 
                     new StaticSiteExporter().run(workspace, tempDir);
 
-                    playwrightExporter.run("file://" + new File(tempDir, "index.html").getAbsolutePath(), format, colorScheme, animation, outputDir);
+                    String staticSiteUrl = "file://" + new File(tempDir, "index.html").getAbsolutePath();
+                    if (PDF_FORMAT.equals(format)) {
+                        playwrightExporter.runPdf(staticSiteUrl, colorScheme, new File(outputDir, pdfFilename(workspacePath, workspace.getId())));
+                    } else {
+                        playwrightExporter.run(staticSiteUrl, format, colorScheme, animation, outputDir);
+                    }
                     return true;
                 } catch (Exception e) {
                     log.error(e.getMessage());
@@ -181,7 +184,11 @@ public class ExportCommand extends AbstractCommand {
                 File outputDir = new File(outputPath);
                 outputDir.mkdirs();
 
-                playwrightExporter.run(url, format, colorScheme, animation, outputDir);
+                if (PDF_FORMAT.equals(format)) {
+                    playwrightExporter.runPdf(url, colorScheme, new File(outputDir, pdfFilename(null, 0)));
+                } else {
+                    playwrightExporter.run(url, format, colorScheme, animation, outputDir);
+                }
                 return true;
             }
         }
@@ -292,6 +299,14 @@ public class ExportCommand extends AbstractCommand {
         }
 
         return null;
+    }
+
+    private String pdfFilename(File workspacePath, long workspaceId) {
+        if (workspacePath != null && workspacePath.isFile() && workspacePath.getName().contains(".")) {
+            return workspacePath.getName().substring(0, workspacePath.getName().lastIndexOf('.')) + ".pdf";
+        }
+
+        return prefix(workspaceId) + ".pdf";
     }
 
     private String prefix(long workspaceId) {
