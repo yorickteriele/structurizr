@@ -7211,6 +7211,7 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         // build the ELK graph: elements are nodes, boundaries/groups/deployment nodes are compound nodes
         var nodesById = {};
         var portSides = undefined;
+        var portOrderBoxes = undefined;
         const toElkNode = function(cell) {
             const children = cell.getEmbeddedCells().filter(function(c) { return c.isElement() && isLaidOut(c); });
             const size = cell.size();
@@ -7227,25 +7228,41 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
                 node.height = size.height;
 
                 if (portSides !== undefined) {
-                    // relationships start/end in the middle of a side
-                    const sidesUsed = {};
+                    // each relationship gets its own point on a side: one goes in the middle, several are spread evenly
+                    // (in the order of where they go to/come from, so that they don't cross next to the element)
+                    const bySide = {};
                     edges.forEach(function(edge) {
-                        if (portSides[edge.id] === undefined) return;
-                        if (edge.sources[0] === node.id) sidesUsed[portSides[edge.id].source] = true;
-                        if (edge.targets[0] === node.id) sidesUsed[portSides[edge.id].target] = true;
+                        const side = portSides[edge.id];
+                        if (side === undefined) return;
+                        if (edge.sources[0] === node.id) (bySide[side.source] = bySide[side.source] || []).push({ edge: edge, other: edge.targets[0] });
+                        if (edge.targets[0] === node.id) (bySide[side.target] = bySide[side.target] || []).push({ edge: edge, other: edge.sources[0] });
                     });
-                    // for people/robots, the sides are attached to the middle of the body rather than the whole shape (which includes the head)
+
+                    // for people/robots, the left/right sides are the body (the shape includes the head)
                     const type = ('' + cell.get('type')).toLowerCase();
-                    const sideY = (type.indexOf('person') > -1 || type.indexOf('robot') > -1) ? size.height * (300 / 450) : size.height / 2;
-                    node.ports = Object.keys(sidesUsed).map(function(side) {
-                        return {
-                            id: portId(node.id, side),
-                            width: 0,
-                            height: 0,
-                            x: (side === 'NORTH' || side === 'SOUTH') ? size.width / 2 : (side === 'EAST' ? size.width : 0),
-                            y: (side === 'EAST' || side === 'WEST') ? sideY : (side === 'SOUTH' ? size.height : 0),
-                            layoutOptions: { 'elk.port.side': side }
+                    const person = (type.indexOf('person') > -1 || type.indexOf('robot') > -1);
+
+                    node.ports = [];
+                    Object.keys(bySide).forEach(function(side) {
+                        const list = bySide[side];
+                        const alongX = (side === 'NORTH' || side === 'SOUTH');
+                        const centreOf = function(id) {
+                            const box = portOrderBoxes !== undefined ? portOrderBoxes[id] : undefined;
+                            return box === undefined ? 0 : (alongX ? box.x + (box.width / 2) : box.y + (box.height / 2));
                         };
+                        list.sort(function(a, b) { return centreOf(a.other) - centreOf(b.other); });
+
+                        list.forEach(function(item, index) {
+                            const fraction = (index + 1) / (list.length + 1);
+                            node.ports.push({
+                                id: portId(node.id, side, item.edge.id),
+                                width: 0,
+                                height: 0,
+                                x: alongX ? size.width * fraction : (side === 'EAST' ? size.width : 0),
+                                y: alongX ? (side === 'SOUTH' ? size.height : 0) : (person ? size.height * (175 + (250 * fraction)) / 450 : size.height * fraction),
+                                layoutOptions: { 'elk.port.side': side }
+                            });
+                        });
                     });
                     node.layoutOptions = { 'elk.portConstraints': 'FIXED_POS' };
                 }
@@ -7285,8 +7302,8 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             }
         });
 
-        const portId = function(nodeId, side) {
-            return nodeId + '_' + side;
+        const portId = function(nodeId, side, edgeId) {
+            return nodeId + '_' + side + '_' + edgeId;
         };
 
         const buildElkGraph = function(sides) {
@@ -7304,8 +7321,8 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
                     const side = sides !== undefined ? sides[edge.id] : undefined;
                     return {
                         id: edge.id,
-                        sources: [ side && nodesById[edge.sources[0]].ports ? portId(edge.sources[0], side.source) : edge.sources[0] ],
-                        targets: [ side && nodesById[edge.targets[0]].ports ? portId(edge.targets[0], side.target) : edge.targets[0] ],
+                        sources: [ side && nodesById[edge.sources[0]].ports ? portId(edge.sources[0], side.source, edge.id) : edge.sources[0] ],
+                        targets: [ side && nodesById[edge.targets[0]].ports ? portId(edge.targets[0], side.target, edge.id) : edge.targets[0] ],
                         labels: edge.labels
                     };
                 })
@@ -7397,10 +7414,8 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
 
                     const offset = layout.absolute[edgeContainer(edge.sources[0], edge.targets[0])] || { x: 0, y: 0 };
                     const section = resultEdge.sections[0];
-                    const resultLabel = (resultEdge.labels && resultEdge.labels.length > 0) ? resultEdge.labels[0] : undefined;
                     routes.push({
                         edge: edge,
-                        label: resultLabel ? { x: resultLabel.x + offset.x, y: resultLabel.y + offset.y, width: resultLabel.width, height: resultLabel.height } : undefined,
                         points: [ section.startPoint ].concat(section.bendPoints || []).concat([ section.endPoint ]).map(function(p) {
                             return { x: p.x + offset.x, y: p.y + offset.y };
                         })
@@ -7413,8 +7428,196 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             return { absolute: layout.absolute, boxes: layout.boxes, routes: routes };
         };
 
-        // the fewer crossings and bends, the better (a crossing is much worse than a bend)
-        const score = function(routes) {
+        // places the label of each relationship on a straight part of its line, preferring the longest parts running
+        // in the layout direction (where ELK left room for labels), and avoiding other lines, labels and elements;
+        // returns the number of conflicts that couldn't be avoided
+        const placeLabels = function(routes, elementBoxes, borders) {
+            const verticalLayout = (direction === 'DOWN' || direction === 'UP');
+            const placed = [];
+            var conflicts = 0;
+
+            const segmentHitsBox = function(a, b, box) {
+                if (Math.abs(a.x - b.x) < 1) {
+                    return a.x > box.x && a.x < box.x + box.width && Math.max(a.y, b.y) > box.y && Math.min(a.y, b.y) < box.y + box.height;
+                } else {
+                    return a.y > box.y && a.y < box.y + box.height && Math.max(a.x, b.x) > box.x && Math.min(a.x, b.x) < box.x + box.width;
+                }
+            };
+            const overlaps = function(a, b) {
+                return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+            };
+
+            routes.forEach(function(route) {
+                const size = (route.edge.labels && route.edge.labels.length > 0) ? route.edge.labels[0] : undefined;
+                if (size === undefined) return;
+                // the label's text is usually a little smaller than the space reserved for it
+                const width = size.width * 0.8;
+                const height = size.height;
+
+                const segments = [];
+                for (var i = 1; i < route.points.length; i++) {
+                    const a = route.points[i - 1];
+                    const b = route.points[i];
+                    const inDirection = verticalLayout ? Math.abs(a.x - b.x) < 1 : Math.abs(a.y - b.y) < 1;
+                    segments.push({ a: a, b: b, length: Math.abs(a.x - b.x) + Math.abs(a.y - b.y), inDirection: inDirection });
+                }
+                segments.sort(function(s1, s2) { return (s2.inDirection - s1.inDirection) || (s2.length - s1.length); });
+
+                var best = undefined;
+                segments.forEach(function(segment) {
+                    [ 0.5, 0.35, 0.65, 0.2, 0.8 ].forEach(function(t) {
+                        if (best !== undefined && best.conflicts === 0) return;
+                        const centre = { x: segment.a.x + ((segment.b.x - segment.a.x) * t), y: segment.a.y + ((segment.b.y - segment.a.y) * t) };
+                        const box = { x: centre.x - (width / 2), y: centre.y - (height / 2), width: width, height: height };
+                        var count = 0;
+                        routes.forEach(function(other) {
+                            if (other === route) return;
+                            for (var j = 1; j < other.points.length; j++) {
+                                if (segmentHitsBox(other.points[j - 1], other.points[j], box)) count++;
+                            }
+                        });
+                        (borders || []).forEach(function(border) {
+                            for (var j = 1; j < border.points.length; j++) {
+                                if (segmentHitsBox(border.points[j - 1], border.points[j], box)) count++;
+                            }
+                        });
+                        placed.forEach(function(label) { if (overlaps(label, box)) count++; });
+                        elementBoxes.forEach(function(element) { if (overlaps(element, box)) count++; });
+                        if (best === undefined || count < best.conflicts) {
+                            best = { centre: centre, box: box, conflicts: count };
+                        }
+                    });
+                });
+
+                if (best !== undefined) {
+                    route.labelCentre = best.centre;
+                    placed.push(best.box);
+                    conflicts += best.conflicts;
+                }
+            });
+
+            return conflicts;
+        };
+
+        // a tiny jog just before/after an element (because neighbouring points on the sides don't quite line up) is
+        // removed by moving the end of the line slightly along the element's side
+        const removeTinyJogs = function(routes, boxes) {
+            const tiny = 30;
+            routes.forEach(function(route) {
+                const p = route.points;
+                if (p.length < 4) return;
+                [ { end: 0, bend: 1, before: 2, box: boxes[route.edge.sources[0]] }, { end: p.length - 1, bend: p.length - 2, before: p.length - 3, box: boxes[route.edge.targets[0]] } ].forEach(function(e) {
+                    const box = e.box;
+                    if (box === undefined) return;
+                    const end = p[e.end];
+                    const bend = p[e.bend];
+                    const before = p[e.before];
+                    const vertical = Math.abs(end.x - bend.x) < 1;
+                    const jog = vertical ? Math.abs(bend.x - before.x) : Math.abs(bend.y - before.y);
+                    const jogIsPerpendicular = vertical ? Math.abs(bend.y - before.y) < 1 : Math.abs(bend.x - before.x) < 1;
+                    if (jog === 0 || jog >= tiny || !jogIsPerpendicular) return;
+
+                    const position = vertical ? before.x : before.y;
+                    const min = (vertical ? box.x : box.y) + 10;
+                    const max = (vertical ? box.x + box.width : box.y + box.height) - 10;
+                    if (position < min || position > max) return;
+
+                    // keep clear of the other lines on the same element
+                    const clear = routes.every(function(other) {
+                        if (other === route) return true;
+                        return [ other.points[0], other.points[other.points.length - 1] ].every(function(point) {
+                            const sameSide = vertical ? Math.abs(point.y - end.y) < 2 : Math.abs(point.x - end.x) < 2;
+                            return !sameSide || Math.abs((vertical ? point.x : point.y) - position) >= 20;
+                        });
+                    });
+                    if (!clear) return;
+
+                    if (vertical) {
+                        end.x = position;
+                        bend.x = position;
+                    } else {
+                        end.y = position;
+                        bend.y = position;
+                    }
+                });
+            });
+        };
+
+        // a line that runs along the border of a boundary is moved outwards, away from that border
+        const moveOffBorders = function(routes, boxes) {
+            const distance = 25;
+            const borders = boundaryBorders(boxes);
+            routes.forEach(function(route) {
+                const p = route.points;
+                for (var i = 1; i < p.length; i++) {
+                    const a = p[i - 1];
+                    const b = p[i];
+                    const vertical = Math.abs(a.x - b.x) < 1;
+                    borders.forEach(function(border) {
+                        const box = border.box;
+                        var shift = 0;
+                        if (vertical) {
+                            const overlap = Math.min(Math.max(a.y, b.y), box.y + box.height) - Math.max(Math.min(a.y, b.y), box.y);
+                            if (overlap <= 10) return;
+                            if (Math.abs(a.x - box.x) < 10) shift = -distance;
+                            else if (Math.abs(a.x - (box.x + box.width)) < 10) shift = distance;
+                        } else {
+                            const overlap = Math.min(Math.max(a.x, b.x), box.x + box.width) - Math.max(Math.min(a.x, b.x), box.x);
+                            if (overlap <= 10) return;
+                            if (Math.abs(a.y - box.y) < 10) shift = -distance;
+                            else if (Math.abs(a.y - (box.y + box.height)) < 10) shift = distance;
+                        }
+                        if (shift === 0) return;
+
+                        // if this is the first/last segment, its end must stay on the element's side
+                        const ends = [];
+                        if (i - 1 === 0) ends.push({ point: a, box: boxes[route.edge.sources[0]] });
+                        if (i === p.length - 1) ends.push({ point: b, box: boxes[route.edge.targets[0]] });
+                        const ok = ends.every(function(end) {
+                            if (end.box === undefined) return false;
+                            const position = (vertical ? end.point.x : end.point.y) + shift;
+                            return vertical ?
+                                (position >= end.box.x + 10 && position <= end.box.x + end.box.width - 10) :
+                                (position >= end.box.y + 10 && position <= end.box.y + end.box.height - 10);
+                        });
+                        if (!ok) return;
+
+                        if (vertical) {
+                            a.x += shift;
+                            b.x += shift;
+                        } else {
+                            a.y += shift;
+                            b.y += shift;
+                        }
+                    });
+                }
+            });
+        };
+
+        // the borders of boundaries/groups/deployment nodes, as lines
+        const boundaryBorders = function(boxes) {
+            const borders = [];
+            Object.keys(nodesById).forEach(function(id) {
+                const box = boxes[id];
+                if (nodesById[id].children === undefined || box === undefined) return;
+                const tl = { x: box.x, y: box.y };
+                const tr = { x: box.x + box.width, y: box.y };
+                const bl = { x: box.x, y: box.y + box.height };
+                const br = { x: box.x + box.width, y: box.y + box.height };
+                borders.push({ points: [ tl, tr, br, bl, tl ], box: box });
+            });
+            return borders;
+        };
+
+        const leafBoxes = function(boxes) {
+            return Object.keys(nodesById).filter(function(id) {
+                return nodesById[id].children === undefined && boxes[id] !== undefined;
+            }).map(function(id) { return boxes[id]; });
+        };
+
+        // fewer bends is better, a line through a label is much worse, and crossings only matter a little
+        const score = function(extracted) {
+            const routes = extracted.routes;
             var bends = 0;
             var crossings = 0;
             const segments = routes.map(function(route) {
@@ -7446,7 +7649,31 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
                 }
             }
 
-            return (crossings * 10) + bends;
+            // lines running along the border of a boundary are hard to follow
+            var alongBorders = 0;
+            const borders = boundaryBorders(extracted.boxes);
+            segments.forEach(function(routeSegments) {
+                routeSegments.forEach(function(segment) {
+                    borders.forEach(function(border) {
+                        for (var j = 1; j < border.points.length; j++) {
+                            const a = border.points[j - 1];
+                            const b = border.points[j];
+                            const vertical = Math.abs(a.x - b.x) < 1;
+                            const segmentVertical = Math.abs(segment[0].x - segment[1].x) < 1;
+                            if (vertical !== segmentVertical) continue;
+                            if (vertical) {
+                                if (Math.abs(a.x - segment[0].x) < 10 && Math.min(Math.max(a.y, b.y), Math.max(segment[0].y, segment[1].y)) - Math.max(Math.min(a.y, b.y), Math.min(segment[0].y, segment[1].y)) > 10) alongBorders++;
+                            } else {
+                                if (Math.abs(a.y - segment[0].y) < 10 && Math.min(Math.max(a.x, b.x), Math.max(segment[0].x, segment[1].x)) - Math.max(Math.min(a.x, b.x), Math.min(segment[0].x, segment[1].x)) > 10) alongBorders++;
+                            }
+                        }
+                    });
+                });
+            });
+
+            const labelConflicts = placeLabels(routes, leafBoxes(extracted.boxes), borders);
+
+            return bends + (labelConflicts * 20) + (alongBorders * 20) + (crossings * 2);
         };
 
         // other ways a relationship could leave/arrive: L-shapes, and side-to-side
@@ -7473,7 +7700,7 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
             return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
         };
-        const cacheKey = 'structurizr/autolayout/elk/' + hash(JSON.stringify(buildElkGraph(undefined), function(key, value) {
+        const cacheKey = 'structurizr/autolayout/elk/v3/' + hash(JSON.stringify(buildElkGraph(undefined), function(key, value) {
             return key === 'cell' ? undefined : value;
         }));
         const readCache = function() {
@@ -7497,9 +7724,10 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         const searchBudgetInMilliseconds = 1500;
         const optimiseSides = function(elk, boxes) {
             const start = Date.now();
+            portOrderBoxes = boxes;
             const evaluate = function(sides) {
                 return elk.layout(buildElkGraph(sides)).then(function(result) {
-                    return { sides: sides, result: result, score: score(extractRoutes(result).routes) };
+                    return { sides: sides, result: result, score: score(extractRoutes(result)) };
                 });
             };
 
@@ -7585,6 +7813,18 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             });
             repositionAllParentCells();
 
+            // boundaries are drawn (sized) by Structurizr, so use where they actually are for the finishing touches
+            const finalBoxes = Object.assign({}, extracted.boxes);
+            Object.keys(nodesById).forEach(function(id) {
+                if (nodesById[id].children !== undefined) {
+                    const bbox = nodesById[id].cell.getBBox();
+                    finalBoxes[id] = { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
+                }
+            });
+            removeTinyJogs(routes, finalBoxes);
+            moveOffBorders(routes, finalBoxes);
+            placeLabels(routes, leafBoxes(finalBoxes), boundaryBorders(finalBoxes));
+
             // 2. route each relationship along the orthogonal path calculated by ELK, with its label where ELK put it
             routes.forEach(function(route) {
                 const link = route.edge.link;
@@ -7617,35 +7857,11 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
                 link.prop('source/anchor', { name: 'perpendicular' });
                 link.prop('target/anchor', { name: 'perpendicular' });
 
-                if (route.label) {
+                if (route.labelCentre) {
                     const linkView = paper.findViewByModel(link);
                     const totalLength = linkView.getConnectionLength();
                     if (totalLength > 0) {
-                        // the label goes in the middle of the longest straight segment running in the layout direction
-                        // (that's where ELK left room for labels), or otherwise the longest segment
-                        const verticalLayout = (direction === 'DOWN' || direction === 'UP');
-                        var longest = 0;
-                        var longestInDirection = 0;
-                        var centre = undefined;
-                        var centreInDirection = undefined;
-                        for (var i = 1; i < route.points.length; i++) {
-                            const a = route.points[i - 1];
-                            const b = route.points[i];
-                            const length = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-                            const middle = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-                            const inDirection = verticalLayout ? Math.abs(a.x - b.x) < 1 : Math.abs(a.y - b.y) < 1;
-                            if (length > longest) {
-                                longest = length;
-                                centre = middle;
-                            }
-                            if (inDirection && length > longestInDirection) {
-                                longestInDirection = length;
-                                centreInDirection = middle;
-                            }
-                        }
-                        if (centreInDirection !== undefined && longestInDirection >= 100) {
-                            centre = centreInDirection;
-                        }
+                        const centre = route.labelCentre;
                         const distance = Math.min(0.95, Math.max(0.05, linkView.getClosestPointLength(centre) / totalLength));
                         const labels = JSON.parse(JSON.stringify(link.get('labels')));
                         labels.forEach(function(l) {
