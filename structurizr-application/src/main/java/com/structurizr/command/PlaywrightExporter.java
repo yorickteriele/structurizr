@@ -8,4 +8,6 @@ interface PlaywrightExporter {
 
     void run(String url, String format, ColorScheme colorScheme, boolean animation, File outputDir);
 
+    void runPdf(String url, ColorScheme colorScheme, File outputFile);
+
 }

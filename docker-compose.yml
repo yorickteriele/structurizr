@@ -1,0 +1,23 @@
+# Run Structurizr locally, with PDF export support.
+#
+#   docker compose up --build                     # Structurizr local on http://localhost:8080
+#   docker compose run --rm export                # exports ./docker/workspace/workspace.dsl to workspace.pdf
+#
+# Your workspace lives in ./docker/workspace (override with STRUCTURIZR_WORKSPACE=/path/to/dir).
+
+services:
+  structurizr:
+    build: .
+    image: structurizr-pdf:latest
+    command: ["local"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${STRUCTURIZR_WORKSPACE:-./docker/workspace}:/usr/local/structurizr
+
+  export:
+    image: structurizr-pdf:latest
+    profiles: ["export"]
+    command: ["export", "-w", "workspace.dsl", "-f", "pdf"]
+    volumes:
+      - ${STRUCTURIZR_WORKSPACE:-./docker/workspace}:/usr/local/structurizr

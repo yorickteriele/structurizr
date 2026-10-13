@@ -1209,6 +1209,67 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         }
     }
 
+    function findNavigableElement(element) {
+        if (element.type === structurizr.constants.SOFTWARE_SYSTEM_INSTANCE_ELEMENT_TYPE) {
+            return structurizr.workspace.findElementById(element.softwareSystemId);
+        } else if (element.type === structurizr.constants.CONTAINER_INSTANCE_ELEMENT_TYPE) {
+            return structurizr.workspace.findElementById(element.containerId);
+        }
+
+        return element;
+    }
+
+    function findViewsToNavigateTo(element) {
+        var views = [];
+
+        if (element.type === structurizr.constants.SOFTWARE_SYSTEM_ELEMENT_TYPE) {
+            if (currentView.type === structurizr.constants.SYSTEM_LANDSCAPE_VIEW_TYPE || currentView.softwareSystemId !== element.id) {
+                views = structurizr.workspace.findSystemContextViewsForSoftwareSystem(element.id).concat(structurizr.workspace.findContainerViewsForSoftwareSystem(element.id));
+            } else if (currentView.type === structurizr.constants.SYSTEM_CONTEXT_VIEW_TYPE) {
+                views = structurizr.workspace.findContainerViewsForSoftwareSystem(element.id);
+            }
+        } else if (element.type === structurizr.constants.CONTAINER_ELEMENT_TYPE) {
+            views = structurizr.workspace.findComponentViewsForContainer(element.id);
+        }
+
+        return views.concat(structurizr.workspace.findImageViewsForElement(element.id));
+    }
+
+    // returns the elements on the current diagram that can be "zoomed into", along with their position/size
+    // (in diagram coordinates) and the keys of the views they navigate to
+    this.getNavigationLinks = function() {
+        const links = [];
+
+        Object.keys(cellsByElementId).forEach(function(elementId) {
+            const cell = cellsByElementId[elementId];
+            const element = structurizr.workspace.findElementById(elementId);
+            if (cell === undefined || element === undefined) {
+                return;
+            }
+
+            const views = findViewsToNavigateTo(findNavigableElement(element)).filter(function(view) {
+                return view.key !== currentView.key;
+            });
+
+            if (views.length > 0) {
+                const position = cell.get('position');
+                const size = cell.get('size');
+
+                links.push({
+                    elementId: elementId,
+                    name: element.name,
+                    x: position.x,
+                    y: position.y,
+                    width: size.width,
+                    height: size.height,
+                    views: views.map(function(view) { return view.key; })
+                });
+            }
+        });
+
+        return links;
+    };
+
     function addDoubleClickHandlerForElement(cellView, element) {
         var domElement = $('#' + cellView.id);
         var views = [];
@@ -1228,23 +1289,8 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
 
         const elementDoubleClicked = element;
 
-        if (element.type === structurizr.constants.SOFTWARE_SYSTEM_INSTANCE_ELEMENT_TYPE) {
-            element = structurizr.workspace.findElementById(element.softwareSystemId);
-        } else if (element.type === structurizr.constants.CONTAINER_INSTANCE_ELEMENT_TYPE) {
-            element = structurizr.workspace.findElementById(element.containerId);
-        }
-
-        if (element.type === structurizr.constants.SOFTWARE_SYSTEM_ELEMENT_TYPE) {
-            if (currentView.type === structurizr.constants.SYSTEM_LANDSCAPE_VIEW_TYPE || currentView.softwareSystemId !== element.id) {
-                views = structurizr.workspace.findSystemContextViewsForSoftwareSystem(element.id).concat(structurizr.workspace.findContainerViewsForSoftwareSystem(element.id));
-            } else if (currentView.type === structurizr.constants.SYSTEM_CONTEXT_VIEW_TYPE) {
-                views = structurizr.workspace.findContainerViewsForSoftwareSystem(element.id);
-            }
-        } else if (element.type === structurizr.constants.CONTAINER_ELEMENT_TYPE) {
-            views = structurizr.workspace.findComponentViewsForContainer(element.id);
-        }
-
-        views = views.concat(structurizr.workspace.findImageViewsForElement(element.id));
+        element = findNavigableElement(element);
+        views = findViewsToNavigateTo(element);
 
         documentation = (element.documentation && element.documentation.sections && element.documentation.sections.length > 0);
         decisions = (element.documentation && element.documentation.decisions && element.documentation.decisions.length > 0);
