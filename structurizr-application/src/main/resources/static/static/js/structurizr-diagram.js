@@ -5270,7 +5270,10 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             $(".structurizrMetadata>tspan").attr('display', 'none');
         }
 
-        $(".structurizrNavigation").attr('display', 'none');
+        if (options.navigation !== true) {
+            // the navigation icons (e.g. zoom) are only useful when the export is interactive (e.g. PDF)
+            $(".structurizrNavigation").attr('display', 'none');
+        }
 
         var svgMarkup = getSvgOfCurrentDiagram();
         svgMarkup = svgMarkup.substring(svgMarkup.indexOf(">") +1 );

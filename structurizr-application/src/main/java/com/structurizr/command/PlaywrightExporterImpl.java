@@ -105,7 +105,7 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
                     const results = [];
                     structurizr.scripting.exportViews(
                         views.map(function(view) { return view.key; }),
-                        { format: 'svg', prefix: '', publish: true, metadata: true, animation: false },
+                        { format: 'svg', prefix: '', publish: true, metadata: true, animation: false, navigation: true },
                         function(view, diagram, diagramKey) {
                             const metadata = views.find(function(v) { return v.key === view.key; });
                             results.push({

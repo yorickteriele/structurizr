@@ -182,6 +182,7 @@
                 metadata: $('#exportMetadata').is(':checked') === true,
                 animation: false,
                 crop: false,
+                navigation: true,
                 prefix: ''
             },
             function(view, diagram) {
