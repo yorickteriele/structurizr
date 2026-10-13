@@ -4,3 +4,4 @@
 docker/workspace
 Dockerfile
 docker-compose.yml
+.env

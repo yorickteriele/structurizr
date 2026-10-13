@@ -24,7 +24,25 @@ Or with Docker Compose:
 docker compose up --build
 ```
 
+### Using your own workspace folder
+
+Copy `.env.example` to `.env` and set the folder that contains your `workspace.dsl`:
+
+```
+STRUCTURIZR_WORKSPACE=D:/projects/my-architecture
+STRUCTURIZR_PORT=8080
+```
+
+Docker Compose reads `.env` automatically (`.env` is git-ignored).
+
 ## Export to PDF
+
+### From the browser
+
+Open a diagram, click the **export** button (toolbar) and choose **Export as PDF**. Select the views
+to include (ctrl/shift-click), or select fewer than two to include all views. The PDF is downloaded straight away.
+
+### From the command line
 
 ```bash
 docker run --rm -v "$(pwd)/docker/workspace:/usr/local/structurizr" structurizr-pdf \

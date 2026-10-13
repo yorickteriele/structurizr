@@ -123,11 +123,8 @@ public class ExportCommand extends AbstractCommand {
 
         if (PNG_FORMAT.equals(format) || SVG_FORMAT.equals(format) || PDF_FORMAT.equals(format)) {
             // check the build includes the Playwright exporter
-            PlaywrightExporter playwrightExporter = null;
-            try {
-                Class<?> clazz = Class.forName(PlaywrightExporter.class.getName() + "Impl");
-                playwrightExporter = (PlaywrightExporter)clazz.getDeclaredConstructor().newInstance();
-            } catch (ClassNotFoundException e) {
+            PlaywrightExporter playwrightExporter = PlaywrightExporter.create();
+            if (playwrightExporter == null) {
                 log.fatal("Exporting to PNG/SVG/PDF is not supported in this build");
                 return false;
             }

@@ -5,6 +5,7 @@
 ### export
 
 - Adds a `pdf` export format: a single, clickable PDF with a contents page, one page per view, and links to "zoom in" from elements to their child views (and back up again).
+- Adds an "Export as PDF" button to the diagram export dialog (local/server).
 - Adds a `Dockerfile` and `docker-compose.yml` (see `docker/README.md`) to build and run Structurizr locally with PDF export support.
 
 ## inspect

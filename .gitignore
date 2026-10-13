@@ -27,3 +27,5 @@ structurizr-application/extensions
 
 docker/workspace/*
 !docker/workspace/workspace.dsl
+
+.env

@@ -123,24 +123,38 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
                 })
                 """, colorScheme == ColorScheme.Dark));
 
-            List<PdfView> views = parseViews(json);
-            if (views.isEmpty()) {
-                log.error("The workspace contains no views");
-                browser.close();
-                return;
+            browser.close();
+
+            byte[] pdf = renderPdf(json, colorScheme);
+            if (pdf != null) {
+                log.info("Writing " + outputFile.getCanonicalPath());
+                Files.write(outputFile.toPath(), pdf);
             }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
 
-            File html = File.createTempFile("structurizr", ".html");
-            html.deleteOnExit();
-            Files.writeString(html.toPath(), buildPdfHtml(views, colorScheme), StandardCharsets.UTF_8);
+    @Override
+    public byte[] renderPdf(String viewsAsJson, ColorScheme colorScheme) {
+        List<PdfView> views;
+        try {
+            views = parseViews(viewsAsJson);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
 
-            Page pdfPage = context.newPage();
-            pdfPage.navigate("file://" + html.getAbsolutePath());
-            pdfPage.waitForLoadState();
+        if (views.isEmpty()) {
+            log.error("The workspace contains no views");
+            return null;
+        }
 
-            log.info("Writing " + outputFile.getCanonicalPath());
-            pdfPage.pdf(new Page.PdfOptions()
-                    .setPath(outputFile.toPath())
+        try (Playwright playwright = Playwright.create()) {
+            Browser browser = playwright.chromium().launch(new BrowserType.LaunchOptions().setHeadless(true));
+            Page page = browser.newPage();
+            page.setContent(buildPdfHtml(views, colorScheme));
+
+            byte[] pdf = page.pdf(new Page.PdfOptions()
                     .setPrintBackground(true)
                     .setPreferCSSPageSize(true)
                     .setMargin(new Margin().setTop("0").setBottom("0").setLeft("0").setRight("0"))
@@ -148,8 +162,8 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
                     .setTagged(true));
 
             browser.close();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+
+            return pdf;
         }
     }
 
@@ -165,6 +179,9 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
             view.name = node.path("name").asText(view.key);
             view.description = node.path("description").asText("");
             view.content = node.path("content").asText("");
+            if (!view.content.startsWith("data:image/")) {
+                continue;
+            }
 
             if (view.content.startsWith("data:image/svg+xml;base64,")) {
                 String svg = new String(Base64.getDecoder().decode(view.content.split(",")[1]), StandardCharsets.UTF_8);
@@ -269,7 +286,7 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
             if (view.width > 0 && view.height > 0) {
                 double scale = Math.min(areaWidth / view.width, areaHeight / view.height);
                 buf.append(String.format(Locale.ROOT, "<div class=\"diagram\" style=\"width: %.2fpx; height: %.2fpx\">", view.width * scale, view.height * scale));
-                buf.append("<img src=\"").append(view.content).append("\" alt=\"").append(escape(view.name)).append("\">");
+                buf.append("<img src=\"").append(escape(view.content)).append("\" alt=\"").append(escape(view.name)).append("\">");
 
                 for (PdfLink link : view.links) {
                     PdfView target = link.views.stream().map(viewsByKey::get).filter(Objects::nonNull).findFirst().orElse(null);
@@ -282,7 +299,7 @@ class PlaywrightExporterImpl implements PlaywrightExporter {
                 }
                 buf.append("</div>");
             } else {
-                buf.append(String.format(Locale.ROOT, "<img src=\"%s\" style=\"max-width: %.2fpx; max-height: %.2fpx\" alt=\"%s\">", view.content, areaWidth, areaHeight, escape(view.name)));
+                buf.append(String.format(Locale.ROOT, "<img src=\"%s\" style=\"max-width: %.2fpx; max-height: %.2fpx\" alt=\"%s\">", escape(view.content), areaWidth, areaHeight, escape(view.name)));
             }
             buf.append("</div>");
 
