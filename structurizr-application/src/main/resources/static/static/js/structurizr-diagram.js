@@ -986,31 +986,35 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             }
         });
 
-        if (view.automaticLayout) {
-            if (view.automaticLayout) {
-                structurizr.diagram.applyAutomaticLayout(
-                    view.automaticLayout.rankDirection,
-                    view.automaticLayout.rankSeparation,
-                    view.automaticLayout.nodeSeparation,
-                    view.automaticLayout.edgeSeparation,
-                    view.automaticLayout.vertices
-                );
+        const renderingFinished = function() {
+            if (callback !== undefined) {
+                callback();
             }
+
+            diagramRendered = true;
+        };
+
+        if (view.automaticLayout) {
+            structurizr.diagram.applyAutomaticLayout(
+                view.automaticLayout.rankDirection,
+                view.automaticLayout.rankSeparation,
+                view.automaticLayout.nodeSeparation,
+                view.automaticLayout.edgeSeparation,
+                view.automaticLayout.vertices,
+                renderingFinished
+            );
         } else if (forceApplyAutomaticLayout) {
             structurizr.diagram.applyAutomaticLayout(
                 structurizr.ui.DEFAULT_AUTOLAYOUT_RANK_DIRECTION,
                 structurizr.ui.DEFAULT_AUTOLAYOUT_RANK_SEPARATION,
                 structurizr.ui.DEFAULT_AUTOLAYOUT_NODE_SEPARATION,
                 structurizr.ui.DEFAULT_AUTOLAYOUT_EDGE_SEPARATION,
-                structurizr.ui.DEFAULT_AUTOLAYOUT_VERTICES
+                structurizr.ui.DEFAULT_AUTOLAYOUT_VERTICES,
+                renderingFinished
             );
+        } else {
+            renderingFinished();
         }
-
-        if (callback !== undefined) {
-            callback();
-        }
-
-        diagramRendered = true;
     }
 
     function repositionAllParentCells() {
@@ -1209,6 +1213,67 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         }
     }
 
+    function findNavigableElement(element) {
+        if (element.type === structurizr.constants.SOFTWARE_SYSTEM_INSTANCE_ELEMENT_TYPE) {
+            return structurizr.workspace.findElementById(element.softwareSystemId);
+        } else if (element.type === structurizr.constants.CONTAINER_INSTANCE_ELEMENT_TYPE) {
+            return structurizr.workspace.findElementById(element.containerId);
+        }
+
+        return element;
+    }
+
+    function findViewsToNavigateTo(element) {
+        var views = [];
+
+        if (element.type === structurizr.constants.SOFTWARE_SYSTEM_ELEMENT_TYPE) {
+            if (currentView.type === structurizr.constants.SYSTEM_LANDSCAPE_VIEW_TYPE || currentView.softwareSystemId !== element.id) {
+                views = structurizr.workspace.findSystemContextViewsForSoftwareSystem(element.id).concat(structurizr.workspace.findContainerViewsForSoftwareSystem(element.id));
+            } else if (currentView.type === structurizr.constants.SYSTEM_CONTEXT_VIEW_TYPE) {
+                views = structurizr.workspace.findContainerViewsForSoftwareSystem(element.id);
+            }
+        } else if (element.type === structurizr.constants.CONTAINER_ELEMENT_TYPE) {
+            views = structurizr.workspace.findComponentViewsForContainer(element.id);
+        }
+
+        return views.concat(structurizr.workspace.findImageViewsForElement(element.id));
+    }
+
+    // returns the elements on the current diagram that can be "zoomed into", along with their position/size
+    // (in diagram coordinates) and the keys of the views they navigate to
+    this.getNavigationLinks = function() {
+        const links = [];
+
+        Object.keys(cellsByElementId).forEach(function(elementId) {
+            const cell = cellsByElementId[elementId];
+            const element = structurizr.workspace.findElementById(elementId);
+            if (cell === undefined || element === undefined) {
+                return;
+            }
+
+            const views = findViewsToNavigateTo(findNavigableElement(element)).filter(function(view) {
+                return view.key !== currentView.key;
+            });
+
+            if (views.length > 0) {
+                const position = cell.get('position');
+                const size = cell.get('size');
+
+                links.push({
+                    elementId: elementId,
+                    name: element.name,
+                    x: position.x,
+                    y: position.y,
+                    width: size.width,
+                    height: size.height,
+                    views: views.map(function(view) { return view.key; })
+                });
+            }
+        });
+
+        return links;
+    };
+
     function addDoubleClickHandlerForElement(cellView, element) {
         var domElement = $('#' + cellView.id);
         var views = [];
@@ -1228,23 +1293,8 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
 
         const elementDoubleClicked = element;
 
-        if (element.type === structurizr.constants.SOFTWARE_SYSTEM_INSTANCE_ELEMENT_TYPE) {
-            element = structurizr.workspace.findElementById(element.softwareSystemId);
-        } else if (element.type === structurizr.constants.CONTAINER_INSTANCE_ELEMENT_TYPE) {
-            element = structurizr.workspace.findElementById(element.containerId);
-        }
-
-        if (element.type === structurizr.constants.SOFTWARE_SYSTEM_ELEMENT_TYPE) {
-            if (currentView.type === structurizr.constants.SYSTEM_LANDSCAPE_VIEW_TYPE || currentView.softwareSystemId !== element.id) {
-                views = structurizr.workspace.findSystemContextViewsForSoftwareSystem(element.id).concat(structurizr.workspace.findContainerViewsForSoftwareSystem(element.id));
-            } else if (currentView.type === structurizr.constants.SYSTEM_CONTEXT_VIEW_TYPE) {
-                views = structurizr.workspace.findContainerViewsForSoftwareSystem(element.id);
-            }
-        } else if (element.type === structurizr.constants.CONTAINER_ELEMENT_TYPE) {
-            views = structurizr.workspace.findComponentViewsForContainer(element.id);
-        }
-
-        views = views.concat(structurizr.workspace.findImageViewsForElement(element.id));
+        element = findNavigableElement(element);
+        views = findViewsToNavigateTo(element);
 
         documentation = (element.documentation && element.documentation.sections && element.documentation.sections.length > 0);
         decisions = (element.documentation && element.documentation.decisions && element.documentation.decisions.length > 0);
@@ -5224,7 +5274,10 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
             $(".structurizrMetadata>tspan").attr('display', 'none');
         }
 
-        $(".structurizrNavigation").attr('display', 'none');
+        if (options.navigation !== true) {
+            // the navigation icons (e.g. zoom) are only useful when the export is interactive (e.g. PDF)
+            $(".structurizrNavigation").attr('display', 'none');
+        }
 
         var svgMarkup = getSvgOfCurrentDiagram();
         svgMarkup = svgMarkup.substring(svgMarkup.indexOf(">") +1 );
@@ -6519,6 +6572,229 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         return linksBetweenElements;
     }
 
+    // snap elements to the edges/centres of other elements while dragging (like draw.io), with guide lines;
+    // hold the Alt key while dragging to only snap to the grid
+    const snapDistanceInPixels = 8;
+    var snapGuides = [];
+
+    if (joint.dia.ElementView.prototype.structurizrSnapInstalled !== true) {
+        const snapToGridOriginal = joint.dia.ElementView.prototype.snapToGrid;
+        joint.dia.ElementView.prototype.snapToGrid = function(evt, x, y) {
+            const position = snapToGridOriginal.call(this, evt, x, y);
+            if (this.paper && this.paper.structurizrSnapToElements && !(evt && evt.altKey)) {
+                return this.paper.structurizrSnapToElements(this, position.x, position.y);
+            }
+
+            return position;
+        };
+        joint.dia.ElementView.prototype.structurizrSnapInstalled = true;
+    }
+
+    paper.structurizrSnapToElements = function(elementView, x, y) {
+        removeSnapGuides();
+
+        const cell = elementView.model;
+        const size = cell.size();
+        const threshold = snapDistanceInPixels / scale;
+
+        // don't snap to the element itself, anything inside/around it, or other elements being dragged with it
+        const excluded = new Set([cell.id]);
+        cell.getEmbeddedCells({ deep: true }).forEach(function(c) { excluded.add(c.id); });
+        cell.getAncestors().forEach(function(c) { excluded.add(c.id); });
+        if (elementView.selected === true) {
+            selectedElements.forEach(function(cellView) { excluded.add(cellView.model.id); });
+        }
+
+        const targetCells = graph.getElements().filter(function(c) {
+            return !excluded.has(c.id) && (c.elementInView !== undefined || c.attributes.type === 'structurizr.boundary');
+        });
+        const targets = targetCells.map(toBox);
+        const spacingTargets = targetCells.filter(function(c) { return c.elementInView !== undefined; }).map(toBox);
+
+        // 1. alignment (edges/centres)
+        const alignX = findSnap([x, x + (size.width / 2), x + size.width], targets.map(function(b) { return [b.x, b.x + (b.width / 2), b.x + b.width]; }), threshold);
+        const alignY = findSnap([y, y + (size.height / 2), y + size.height], targets.map(function(b) { return [b.y, b.y + (b.height / 2), b.y + b.height]; }), threshold);
+
+        // 2. equal spacing (same gap as between other elements, or centred between two neighbours)
+        const spaceX = findSpacingSnap({ x: x, y: y + (alignY ? alignY.delta : 0), width: size.width, height: size.height }, spacingTargets, threshold);
+        const spaceY = findSpacingSnap(transpose({ x: x + (alignX ? alignX.delta : 0), y: y, width: size.width, height: size.height }), spacingTargets.map(transpose), threshold);
+
+        // per axis, use whichever snap is closest
+        const useSpaceX = spaceX !== undefined && (alignX === undefined || Math.abs(spaceX.delta) < Math.abs(alignX.delta));
+        const useSpaceY = spaceY !== undefined && (alignY === undefined || Math.abs(spaceY.delta) < Math.abs(alignY.delta));
+        const snapX = useSpaceX ? undefined : alignX;
+        const snapY = useSpaceY ? undefined : alignY;
+
+        x += useSpaceX ? spaceX.delta : (snapX ? snapX.delta : 0);
+        y += useSpaceY ? spaceY.delta : (snapY ? snapY.delta : 0);
+
+        const box = { x: x, y: y, width: size.width, height: size.height };
+        if (snapX) {
+            const boxes = [box].concat(snapX.targets.map(function(i) { return targets[i]; }));
+            addSnapGuide(snapX.value, Math.min.apply(null, boxes.map(function(b) { return b.y; })), snapX.value, Math.max.apply(null, boxes.map(function(b) { return b.y + b.height; })));
+        }
+        if (snapY) {
+            const boxes = [box].concat(snapY.targets.map(function(i) { return targets[i]; }));
+            addSnapGuide(Math.min.apply(null, boxes.map(function(b) { return b.x; })), snapY.value, Math.max.apply(null, boxes.map(function(b) { return b.x + b.width; })), snapY.value);
+        }
+        if (useSpaceX) {
+            spaceX.segments(box).forEach(function(segment) {
+                addSpacingGuide(segment.from, segment.at, segment.to, segment.at, false);
+            });
+        }
+        if (useSpaceY) {
+            spaceY.segments(transpose(box)).forEach(function(segment) {
+                addSpacingGuide(segment.at, segment.from, segment.at, segment.to, true);
+            });
+        }
+
+        return { x: x, y: y };
+    };
+
+    function toBox(cell) {
+        const bbox = cell.getBBox();
+        return { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
+    }
+
+    function transpose(box) {
+        return { x: box.y, y: box.x, width: box.height, height: box.width };
+    }
+
+    // finds a horizontal position for the box that matches an existing gap between elements (or centres it between
+    // its neighbours); for vertical spacing, call this with transposed boxes
+    function findSpacingSnap(box, targets, threshold) {
+        const overlaps = function(a, b) {
+            return a.y < b.y + b.height && b.y < a.y + a.height;
+        };
+        const middleOfOverlap = function(a, b) {
+            return (Math.max(a.y, b.y) + Math.min(a.y + a.height, b.y + b.height)) / 2;
+        };
+
+        // the gaps between each element and its nearest neighbour to the right
+        const gaps = [];
+        targets.forEach(function(a) {
+            var nearest = undefined;
+            targets.forEach(function(b) {
+                if (b !== a && overlaps(a, b) && b.x >= a.x + a.width && (nearest === undefined || b.x < nearest.x)) {
+                    nearest = b;
+                }
+            });
+            if (nearest !== undefined && nearest.x - (a.x + a.width) > 0) {
+                gaps.push({ size: nearest.x - (a.x + a.width), left: a, right: nearest });
+            }
+        });
+
+        // the dragged box's nearest neighbours on the left and right (in the same row)
+        var left = undefined;
+        var right = undefined;
+        const centre = box.x + (box.width / 2);
+        targets.filter(function(t) { return overlaps(t, box); }).forEach(function(t) {
+            if (t.x + t.width <= centre && (left === undefined || t.x + t.width > left.x + left.width)) {
+                left = t;
+            } else if (t.x >= centre && (right === undefined || t.x < right.x)) {
+                right = t;
+            }
+        });
+
+        var best = undefined;
+        const consider = function(newX, segments) {
+            const delta = newX - box.x;
+            if (Math.abs(delta) <= threshold && (best === undefined || Math.abs(delta) < Math.abs(best.delta))) {
+                best = { delta: delta, segments: segments };
+            }
+        };
+        const gapSegment = function(gap) {
+            return { from: gap.left.x + gap.left.width, to: gap.right.x, at: middleOfOverlap(gap.left, gap.right) };
+        };
+
+        gaps.forEach(function(gap) {
+            if (left !== undefined) {
+                consider(left.x + left.width + gap.size, function(b) {
+                    return [ gapSegment(gap), { from: left.x + left.width, to: b.x, at: middleOfOverlap(left, b) } ];
+                });
+            }
+            if (right !== undefined) {
+                consider(right.x - gap.size - box.width, function(b) {
+                    return [ gapSegment(gap), { from: b.x + b.width, to: right.x, at: middleOfOverlap(right, b) } ];
+                });
+            }
+        });
+
+        if (left !== undefined && right !== undefined) {
+            const space = right.x - (left.x + left.width) - box.width;
+            if (space > 0) {
+                consider(left.x + left.width + (space / 2), function(b) {
+                    return [
+                        { from: left.x + left.width, to: b.x, at: middleOfOverlap(left, b) },
+                        { from: b.x + b.width, to: right.x, at: middleOfOverlap(right, b) }
+                    ];
+                });
+            }
+        }
+
+        return best;
+    }
+
+    // draws a gap marker: a line with end ticks
+    function addSpacingGuide(x1, y1, x2, y2, vertical) {
+        const tick = 6 / scale;
+        const colour = '#e83e8c';
+        addSnapGuide(x1, y1, x2, y2, colour, false, 2);
+        if (vertical) {
+            addSnapGuide(x1 - tick, y1, x1 + tick, y1, colour, false, 2);
+            addSnapGuide(x2 - tick, y2, x2 + tick, y2, colour, false, 2);
+        } else {
+            addSnapGuide(x1, y1 - tick, x1, y1 + tick, colour, false, 2);
+            addSnapGuide(x2, y2 - tick, x2, y2 + tick, colour, false, 2);
+        }
+    }
+
+    // finds the smallest adjustment (within the threshold) that lines up one of the dragged element's lines with a target line
+    function findSnap(lines, targetLines, threshold) {
+        var best = undefined;
+        targetLines.forEach(function(candidates, targetIndex) {
+            lines.forEach(function(line) {
+                candidates.forEach(function(candidate) {
+                    const delta = candidate - line;
+                    if (Math.abs(delta) <= threshold) {
+                        if (best === undefined || Math.abs(delta) < Math.abs(best.delta) - 0.01) {
+                            best = { delta: delta, value: candidate, targets: [ targetIndex ] };
+                        } else if (Math.abs(delta - best.delta) < 0.01 && best.targets.indexOf(targetIndex) === -1) {
+                            best.targets.push(targetIndex);
+                        }
+                    }
+                });
+            });
+        });
+
+        return best;
+    }
+
+    function addSnapGuide(x1, y1, x2, y2, colour, dashed, width) {
+        const layer = paper.getLayerNode('tools');
+        if (layer) {
+            const line = joint.V('line', {
+                x1: x1, y1: y1, x2: x2, y2: y2,
+                stroke: colour || '#0d6efd',
+                'stroke-width': width || 1,
+                'stroke-dasharray': dashed === false ? 'none' : '4 3',
+                'vector-effect': 'non-scaling-stroke',
+                'pointer-events': 'none'
+            });
+            layer.appendChild(line.node);
+            snapGuides.push(line.node);
+        }
+    }
+
+    function removeSnapGuides() {
+        snapGuides.forEach(function(node) {
+            if (node.parentNode) {
+                node.parentNode.removeChild(node);
+            }
+        });
+        snapGuides = [];
+    }
+
     function addPaperEventHandlers() {
         paper.on('cell:mouseover', function (cellView, evt) {
             if (cellView.model.elementInView) {
@@ -6612,6 +6888,8 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         });
 
         paper.on('cell:pointerup', function (cell, evt, x, y) {
+            removeSnapGuides();
+
             if (previousPositions && previousPositions.length > 0) {
                 if (!cell.getConnectionLength) {
                     previousPositions.forEach(function (previousPosition) {
@@ -6841,7 +7119,912 @@ structurizr.ui.Diagram = function(id, diagramIsEditable, constructionCompleteCal
         });
     };
 
-    this.applyAutomaticLayout = function(rankDirection, rankSeparation, nodeSeparation, edgeSeparation, linkVertices) {
+    this.applyAutomaticLayout = function(rankDirection, rankSeparation, nodeSeparation, edgeSeparation, linkVertices, callback) {
+        const done = function() {
+            if (callback !== undefined) {
+                callback();
+            }
+        };
+
+        if (useElkLayout()) {
+            const renderedView = currentView;
+            const self = this;
+
+            diagramRendered = false;
+            applyElkLayout(rankDirection, rankSeparation, nodeSeparation, edgeSeparation)
+                .catch(function(err) {
+                    console.error('There was an error applying the ELK automatic layout, falling back to dagre: ' + err);
+                    if (renderedView === currentView) {
+                        applyDagreLayout.call(self, rankDirection, rankSeparation, nodeSeparation, edgeSeparation, linkVertices);
+                    }
+                })
+                .finally(function() {
+                    if (renderedView === currentView) {
+                        diagramRendered = true;
+                        done();
+                    }
+                });
+        } else {
+            applyDagreLayout.call(this, rankDirection, rankSeparation, nodeSeparation, edgeSeparation, linkVertices);
+            done();
+        }
+    };
+
+    // ELK (https://eclipse.dev/elk/) is used by default; set the view/workspace property "structurizr.autolayout" to "dagre" to use dagre instead
+    function useElkLayout() {
+        if (typeof ELK === 'undefined') {
+            return false;
+        }
+
+        const viewOrFilter = (currentFilter !== undefined ? currentFilter : currentView);
+        const engine = getViewOrViewSetProperty(viewOrFilter, 'structurizr.autolayout', 'elk');
+        return ('' + engine).toLowerCase() !== 'dagre';
+    }
+
+    function applyElkLayout(rankDirection, rankSeparation, nodeSeparation, edgeSeparation) {
+        const renderedView = currentView;
+
+        var direction;
+        switch(rankDirection) {
+            case 'BottomTop':
+                direction = 'UP';
+                break;
+            case 'LeftRight':
+                direction = 'RIGHT';
+                break;
+            case 'RightLeft':
+                direction = 'LEFT';
+                break;
+            default:
+                direction = 'DOWN';
+        }
+
+        var cellViews = [];
+        cells.forEach(function(cell) {
+            var element = paper.findViewByModel(cell);
+            if (element.model.positionCalculated === false) {
+                cellViews.push(element);
+            }
+        });
+        addToUndoBuffer(getCurrentElementPositions(cellViews).concat(getCurrentLinkPositions(graph.getLinks())));
+
+        // ELK reserves room for relationship labels itself, so the (dagre-oriented) separations are capped to keep things compact
+        const layoutOptions = {
+            'elk.direction': direction,
+            'elk.edgeRouting': 'ORTHOGONAL',
+            'elk.spacing.nodeNode': '' + Math.min(nodeSeparation, 60),
+            'elk.layered.spacing.nodeNodeBetweenLayers': '' + Math.min(rankSeparation, 40),
+            'elk.spacing.edgeNode': '25',
+            'elk.layered.spacing.edgeNodeBetweenLayers': '15',
+            'elk.spacing.edgeEdge': '25',
+            'elk.layered.spacing.edgeEdgeBetweenLayers': '15',
+            'elk.spacing.edgeLabel': '5',
+            'elk.edgeLabels.placement': 'CENTER',
+            'elk.layered.nodePlacement.strategy': 'NETWORK_SIMPLEX',
+            'elk.layered.nodePlacement.favorStraightEdges': 'true',
+            // lets relationships attach anywhere along an element's side (without resizing it), so that more of them can be straight lines
+            'elk.layered.nodePlacement.networkSimplex.nodeFlexibility.default': 'PORT_POSITION',
+            'elk.layered.thoroughness': '20'
+        };
+
+        // build the ELK graph: elements are nodes, boundaries/groups/deployment nodes are compound nodes
+        var nodesById = {};
+        var portSides = undefined;
+        // elements with relationships to the column of externals on the right are preferably put on the right
+        const linkedToExternal = {};
+        const byExternalLinks = function(a, b) {
+            return (linkedToExternal['' + a.id] ? 1 : 0) - (linkedToExternal['' + b.id] ? 1 : 0);
+        };
+        var portOrderBoxes = undefined;
+        const toElkNode = function(cell) {
+            const children = cell.getEmbeddedCells().filter(function(c) { return c.isElement() && isLaidOut(c); }).sort(byExternalLinks);
+            const size = cell.size();
+            const node = { id: '' + cell.id, cell: cell };
+            if (children.length > 0) {
+                const padding = getBoundaryPadding(cell);
+                // layout options aren't inherited, so each compound node needs them too
+                node.layoutOptions = Object.assign({}, layoutOptions, {
+                    'elk.padding': '[top=' + padding.top + ',left=' + padding.left + ',bottom=' + padding.bottom + ',right=' + padding.right + ']'
+                });
+                node.children = children.map(toElkNode);
+            } else {
+                node.width = size.width;
+                node.height = size.height;
+
+                if (portSides !== undefined) {
+                    // each relationship gets its own point on a side: one goes in the middle, several are spread evenly
+                    // (in the order of where they go to/come from, so that they don't cross next to the element)
+                    const bySide = {};
+                    edges.forEach(function(edge) {
+                        const side = portSides[edge.id];
+                        if (side === undefined) return;
+                        if (edge.sources[0] === node.id) (bySide[side.source] = bySide[side.source] || []).push({ edge: edge, other: edge.targets[0] });
+                        if (edge.targets[0] === node.id) (bySide[side.target] = bySide[side.target] || []).push({ edge: edge, other: edge.sources[0] });
+                    });
+
+                    // for people/robots, the left/right sides are the body (the shape includes the head)
+                    const type = ('' + cell.get('type')).toLowerCase();
+                    const person = (type.indexOf('person') > -1 || type.indexOf('robot') > -1);
+
+                    node.ports = [];
+                    Object.keys(bySide).forEach(function(side) {
+                        const list = bySide[side];
+                        const alongX = (side === 'NORTH' || side === 'SOUTH');
+                        const centreOf = function(id) {
+                            const box = portOrderBoxes !== undefined ? portOrderBoxes[id] : undefined;
+                            return box === undefined ? 0 : (alongX ? box.x + (box.width / 2) : box.y + (box.height / 2));
+                        };
+                        list.sort(function(a, b) { return centreOf(a.other) - centreOf(b.other); });
+
+                        list.forEach(function(item, index) {
+                            const fraction = (index + 1) / (list.length + 1);
+                            node.ports.push({
+                                id: portId(node.id, side, item.edge.id),
+                                width: 0,
+                                height: 0,
+                                x: alongX ? size.width * fraction : (side === 'EAST' ? size.width : 0),
+                                y: alongX ? (side === 'SOUTH' ? size.height : 0) : (person ? size.height * (175 + (250 * fraction)) / 450 : size.height * fraction),
+                                layoutOptions: { 'elk.port.side': side }
+                            });
+                        });
+                    });
+                    node.layoutOptions = { 'elk.portConstraints': 'FIXED_POS' };
+                }
+            }
+            nodesById[node.id] = node;
+
+            return node;
+        };
+
+        // only elements and boundaries take part (not helper cells, such as those used for the diagram key)
+        const isLaidOut = function(cell) {
+            return cell.elementInView !== undefined || cell.attributes.type === 'structurizr.boundary' || cell.getEmbeddedCells().length > 0;
+        };
+        const roots = graph.getElements().filter(function(cell) {
+            return isLaidOut(cell) && (cell.getParentCell() === null || cell.getParentCell() === undefined);
+        });
+
+        // from container views onwards (i.e. when there's a boundary), elements outside the boundaries (other than people)
+        // go in a column on the right, rather than being part of the top-to-bottom layout
+        const isBoundary = function(cell) {
+            return cell.attributes.type === 'structurizr.boundary' || cell.getEmbeddedCells().filter(isLaidOut).length > 0;
+        };
+        var externals = [];
+        if (direction === 'DOWN' && roots.some(isBoundary)) {
+            externals = roots.filter(function(cell) {
+                if (isBoundary(cell) || cell.elementInView === undefined) return false;
+                const element = structurizr.workspace.findElementById(cell.elementInView.id);
+                return element !== undefined && element !== null && element.type !== 'Person';
+            });
+            if (externals.length === roots.length) {
+                externals = [];
+            }
+        }
+        const externalIds = {};
+        externals.forEach(function(cell) { externalIds['' + cell.id] = true; });
+        const mainRoots = roots.filter(function(cell) { return !externalIds['' + cell.id]; });
+        const externalEdges = [];
+
+        const edges = [];
+        graph.getLinks().forEach(function(link, index) {
+            const sourceId = '' + link.get('source').id;
+            const targetId = '' + link.get('target').id;
+            if (link.get('source').id && link.get('target').id && sourceId !== targetId) {
+                const edge = { id: 'e' + index, sources: [ sourceId ], targets: [ targetId ], link: link };
+                const labelSize = link.get('labelSize');
+                const labels = link.get('labels');
+                if (labelSize && labels && labels.length > 0) {
+                    // ELK only reserves space for labels that have text; inline labels are centred on the line
+                    edge.labels = [ {
+                        id: 'l' + index,
+                        text: 'label',
+                        width: labelSize.width,
+                        height: labelSize.height,
+                        layoutOptions: { 'elk.edgeLabels.inline': 'true' }
+                    } ];
+                }
+                if (externalIds[sourceId] || externalIds[targetId]) {
+                    externalEdges.push(edge);
+                } else {
+                    edges.push(edge);
+                }
+            }
+        });
+
+        const portId = function(nodeId, side, edgeId) {
+            return nodeId + '_' + side + '_' + edgeId;
+        };
+
+        externalEdges.forEach(function(edge) {
+            linkedToExternal[edge.sources[0]] = true;
+            linkedToExternal[edge.targets[0]] = true;
+        });
+        if (externals.length > 0) {
+            layoutOptions['elk.layered.considerModelOrder.strategy'] = 'PREFER_NODES';
+        }
+
+        const buildElkGraph = function(sides) {
+            nodesById = {};
+            portSides = sides;
+
+            return {
+                id: 'root',
+                layoutOptions: Object.assign({
+                    'elk.algorithm': 'layered',
+                    'elk.hierarchyHandling': 'INCLUDE_CHILDREN'
+                }, layoutOptions),
+                children: mainRoots.slice().sort(byExternalLinks).map(toElkNode),
+                edges: edges.map(function(edge) {
+                    const side = sides !== undefined ? sides[edge.id] : undefined;
+                    return {
+                        id: edge.id,
+                        sources: [ side && nodesById[edge.sources[0]].ports ? portId(edge.sources[0], side.source, edge.id) : edge.sources[0] ],
+                        targets: [ side && nodesById[edge.targets[0]].ports ? portId(edge.targets[0], side.target, edge.id) : edge.targets[0] ],
+                        labels: edge.labels
+                    };
+                })
+            };
+        };
+
+        // ELK coordinates are relative to the parent node, so work out absolute positions
+        const calculateAbsolutePositions = function(result) {
+            const layout = { absolute: { root: { x: 0, y: 0 } }, parents: {}, boxes: {} };
+            const walk = function(node, parent) {
+                const parentPosition = layout.absolute[parent.id];
+                layout.absolute[node.id] = { x: parentPosition.x + (node.x || 0), y: parentPosition.y + (node.y || 0) };
+                layout.parents[node.id] = parent.id;
+                layout.boxes[node.id] = { x: layout.absolute[node.id].x, y: layout.absolute[node.id].y, width: node.width, height: node.height };
+                (node.children || []).forEach(function(child) { walk(child, node); });
+            };
+            result.children.forEach(function(child) { walk(child, result); });
+
+            return layout;
+        };
+
+        // picks the sides of the elements that each relationship leaves/arrives at, based on where the elements are
+        const chooseSides = function(boxes) {
+            const sides = {};
+            edges.forEach(function(edge) {
+                const s = boxes[edge.sources[0]];
+                const t = boxes[edge.targets[0]];
+                if (s === undefined || t === undefined) return;
+
+                const horizontalGap = Math.max(t.x - (s.x + s.width), s.x - (t.x + t.width));
+                const verticalGap = Math.max(t.y - (s.y + s.height), s.y - (t.y + t.height));
+                const vertical = (direction === 'DOWN' || direction === 'UP') ?
+                    (verticalGap > 0 || horizontalGap <= 0) :
+                    !(horizontalGap > 0 || verticalGap <= 0);
+
+                if (vertical) {
+                    const below = (t.y + (t.height / 2)) >= (s.y + (s.height / 2));
+                    sides[edge.id] = below ? { source: 'SOUTH', target: 'NORTH' } : { source: 'NORTH', target: 'SOUTH' };
+                } else {
+                    const right = (t.x + (t.width / 2)) >= (s.x + (s.width / 2));
+                    sides[edge.id] = right ? { source: 'EAST', target: 'WEST' } : { source: 'WEST', target: 'EAST' };
+                }
+            });
+
+            return sides;
+        };
+
+        // works out the absolute route (and label position) of every relationship in an ELK result
+        const extractRoutes = function(result) {
+            const layout = calculateAbsolutePositions(result);
+            const ancestorsOf = function(id) {
+                const ancestors = [];
+                var parentId = layout.parents[id];
+                while (parentId !== undefined) {
+                    ancestors.push(parentId);
+                    parentId = layout.parents[parentId];
+                }
+                return ancestors;
+            };
+
+            // edge coordinates are relative to the edge's container (as determined by ELK)
+            const edgeContainer = function(sourceId, targetId) {
+                const sourceAncestors = ancestorsOf(sourceId);
+                const targetAncestors = ancestorsOf(targetId);
+                if (targetAncestors.indexOf(sourceId) > -1) {
+                    return sourceId;
+                }
+                if (sourceAncestors.indexOf(targetId) > -1) {
+                    return targetId;
+                }
+                for (var i = 0; i < sourceAncestors.length; i++) {
+                    if (targetAncestors.indexOf(sourceAncestors[i]) > -1) {
+                        return sourceAncestors[i];
+                    }
+                }
+                return 'root';
+            };
+
+            const edgesById = {};
+            edges.forEach(function(edge) { edgesById[edge.id] = edge; });
+
+            const routes = [];
+            const collectRoutes = function(node) {
+                (node.edges || []).forEach(function(resultEdge) {
+                    const edge = edgesById[resultEdge.id];
+                    if (edge === undefined || resultEdge.sections === undefined || resultEdge.sections.length === 0) {
+                        return;
+                    }
+
+                    const offset = layout.absolute[edgeContainer(edge.sources[0], edge.targets[0])] || { x: 0, y: 0 };
+                    const section = resultEdge.sections[0];
+                    routes.push({
+                        edge: edge,
+                        points: [ section.startPoint ].concat(section.bendPoints || []).concat([ section.endPoint ]).map(function(p) {
+                            return { x: p.x + offset.x, y: p.y + offset.y };
+                        })
+                    });
+                });
+                (node.children || []).forEach(collectRoutes);
+            };
+            collectRoutes(result);
+
+            return { absolute: layout.absolute, boxes: layout.boxes, routes: routes };
+        };
+
+        // places the label of each relationship on a straight part of its line, preferring the longest parts running
+        // in the layout direction (where ELK left room for labels), and avoiding other lines, labels and elements;
+        // returns the number of conflicts that couldn't be avoided
+        const placeLabels = function(routes, elementBoxes, borders) {
+            const verticalLayout = (direction === 'DOWN' || direction === 'UP');
+            const placed = [];
+            var conflicts = 0;
+
+            const segmentHitsBox = function(a, b, box) {
+                if (Math.abs(a.x - b.x) < 1) {
+                    return a.x > box.x && a.x < box.x + box.width && Math.max(a.y, b.y) > box.y && Math.min(a.y, b.y) < box.y + box.height;
+                } else {
+                    return a.y > box.y && a.y < box.y + box.height && Math.max(a.x, b.x) > box.x && Math.min(a.x, b.x) < box.x + box.width;
+                }
+            };
+            const overlaps = function(a, b) {
+                return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+            };
+
+            routes.forEach(function(route) {
+                const size = (route.edge.labels && route.edge.labels.length > 0) ? route.edge.labels[0] : undefined;
+                if (size === undefined) return;
+                // the label's text is usually a little smaller than the space reserved for it
+                const width = size.width * 0.8;
+                const height = size.height;
+
+                const segments = [];
+                for (var i = 1; i < route.points.length; i++) {
+                    const a = route.points[i - 1];
+                    const b = route.points[i];
+                    const inDirection = verticalLayout ? Math.abs(a.x - b.x) < 1 : Math.abs(a.y - b.y) < 1;
+                    segments.push({ a: a, b: b, length: Math.abs(a.x - b.x) + Math.abs(a.y - b.y), inDirection: inDirection });
+                }
+                segments.sort(function(s1, s2) { return (s2.inDirection - s1.inDirection) || (s2.length - s1.length); });
+
+                var best = undefined;
+                segments.forEach(function(segment) {
+                    [ 0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8, 0.12, 0.88 ].forEach(function(t) {
+                        if (best !== undefined && best.conflicts === 0) return;
+                        const centre = { x: segment.a.x + ((segment.b.x - segment.a.x) * t), y: segment.a.y + ((segment.b.y - segment.a.y) * t) };
+                        const box = { x: centre.x - (width / 2), y: centre.y - (height / 2), width: width, height: height };
+                        var count = 0;
+                        routes.forEach(function(other) {
+                            if (other === route) return;
+                            for (var j = 1; j < other.points.length; j++) {
+                                if (segmentHitsBox(other.points[j - 1], other.points[j], box)) count++;
+                            }
+                        });
+                        (borders || []).forEach(function(border) {
+                            for (var j = 1; j < border.points.length; j++) {
+                                if (segmentHitsBox(border.points[j - 1], border.points[j], box)) count++;
+                            }
+                        });
+                        placed.forEach(function(label) { if (overlaps(label, box)) count++; });
+                        elementBoxes.forEach(function(element) { if (overlaps(element, box)) count++; });
+                        if (best === undefined || count < best.conflicts) {
+                            best = { centre: centre, box: box, conflicts: count };
+                        }
+                    });
+                });
+
+                if (best !== undefined) {
+                    route.labelCentre = best.centre;
+                    placed.push(best.box);
+                    conflicts += best.conflicts;
+                }
+            });
+
+            return conflicts;
+        };
+
+        // removes a sideways jog next to an element (end -> bend -> short sideways step -> bend), by sliding the end of
+        // the line along the element's side, when there's room for it there and the line doesn't then cross an element
+        const removeJogs = function(routes, boxes) {
+            const maxJog = 80;
+            const margin = 30;
+            const gap = 40;
+            const leaves = leafBoxes(boxes);
+            const isVertical = function(a, b) { return Math.abs(a.x - b.x) < 1; };
+            const isHorizontal = function(a, b) { return Math.abs(a.y - b.y) < 1; };
+
+            const crossesElement = function(a, b, except) {
+                return leaves.some(function(box) {
+                    if (except.indexOf(box) > -1) return false;
+                    if (isVertical(a, b)) {
+                        return a.x > box.x - 5 && a.x < box.x + box.width + 5 && Math.max(a.y, b.y) > box.y && Math.min(a.y, b.y) < box.y + box.height;
+                    }
+                    return a.y > box.y - 5 && a.y < box.y + box.height + 5 && Math.max(a.x, b.x) > box.x && Math.min(a.x, b.x) < box.x + box.width;
+                });
+            };
+
+            const endsOn = function(id, except) {
+                const points = [];
+                routes.forEach(function(route) {
+                    if (route === except) return;
+                    if (route.edge.sources[0] === id) points.push(route.points[0]);
+                    if (route.edge.targets[0] === id) points.push(route.points[route.points.length - 1]);
+                });
+                return points;
+            };
+
+            // removes duplicate points, and points in the middle of a straight line
+            const simplify = function(points) {
+                const unique = [ points[0] ];
+                for (var i = 1; i < points.length; i++) {
+                    const last = unique[unique.length - 1];
+                    if (Math.abs(last.x - points[i].x) >= 1 || Math.abs(last.y - points[i].y) >= 1) unique.push(points[i]);
+                }
+                const result = [ unique[0] ];
+                for (var j = 1; j < unique.length - 1; j++) {
+                    const a = result[result.length - 1];
+                    const b = unique[j];
+                    const c = unique[j + 1];
+                    if ((isVertical(a, b) && isVertical(b, c)) || (isHorizontal(a, b) && isHorizontal(b, c))) continue;
+                    result.push(b);
+                }
+                result.push(unique[unique.length - 1]);
+                return result;
+            };
+
+            for (var round = 0; round < 10; round++) {
+                const candidates = [];
+                routes.forEach(function(route) {
+                    const p = route.points;
+                    if (p.length < 4) return;
+                    [ { id: route.edge.sources[0], i: [ 0, 1, 2, 3 ] }, { id: route.edge.targets[0], i: [ p.length - 1, p.length - 2, p.length - 3, p.length - 4 ] } ].forEach(function(end) {
+                        const e = p[end.i[0]], b1 = p[end.i[1]], b2 = p[end.i[2]], next = p[end.i[3]];
+                        const vertical = isVertical(e, b1);
+                        const zShaped = vertical ? (isHorizontal(b1, b2) && isVertical(b2, next)) : (isVertical(b1, b2) && isHorizontal(b2, next));
+                        if (!zShaped) return;
+                        const jog = vertical ? Math.abs(b1.x - b2.x) : Math.abs(b1.y - b2.y);
+                        if (jog < maxJog) {
+                            candidates.push({ route: route, id: end.id, i: end.i, vertical: vertical, jog: jog });
+                        }
+                    });
+                });
+                candidates.sort(function(a, b) { return a.jog - b.jog; });
+
+                const changed = candidates.some(function(c) {
+                    const p = c.route.points;
+                    const box = boxes[c.id];
+                    if (box === undefined) return false;
+                    const position = c.vertical ? p[c.i[2]].x : p[c.i[2]].y;
+                    const min = (c.vertical ? box.x : box.y) + margin;
+                    const max = (c.vertical ? box.x + box.width : box.y + box.height) - margin;
+                    if (position < min || position > max) return false;
+
+                    const e = p[c.i[0]];
+                    const tooClose = endsOn(c.id, c.route).some(function(point) {
+                        const sameSide = c.vertical ? Math.abs(point.y - e.y) < 2 : Math.abs(point.x - e.x) < 2;
+                        return sameSide && Math.abs((c.vertical ? point.x : point.y) - position) < gap;
+                    });
+                    if (tooClose) return false;
+
+                    const newEnd = c.vertical ? { x: position, y: e.y } : { x: e.x, y: position };
+                    if (crossesElement(newEnd, p[c.i[2]], [ boxes[c.route.edge.sources[0]], boxes[c.route.edge.targets[0]] ])) return false;
+
+                    p[c.i[0]] = newEnd;
+                    p[c.i[1]] = { x: newEnd.x, y: newEnd.y };
+                    c.route.points = simplify(p);
+                    return true;
+                });
+                if (!changed) break;
+            }
+        };
+
+        // a line that runs along the border of a boundary is moved outwards, away from that border
+        const moveOffBorders = function(routes, boxes) {
+            const distance = 25;
+            const borders = boundaryBorders(boxes);
+            routes.forEach(function(route) {
+                const p = route.points;
+                for (var i = 1; i < p.length; i++) {
+                    const a = p[i - 1];
+                    const b = p[i];
+                    const vertical = Math.abs(a.x - b.x) < 1;
+                    borders.forEach(function(border) {
+                        const box = border.box;
+                        var shift = 0;
+                        if (vertical) {
+                            const overlap = Math.min(Math.max(a.y, b.y), box.y + box.height) - Math.max(Math.min(a.y, b.y), box.y);
+                            if (overlap <= 10) return;
+                            if (Math.abs(a.x - box.x) < 10) shift = -distance;
+                            else if (Math.abs(a.x - (box.x + box.width)) < 10) shift = distance;
+                        } else {
+                            const overlap = Math.min(Math.max(a.x, b.x), box.x + box.width) - Math.max(Math.min(a.x, b.x), box.x);
+                            if (overlap <= 10) return;
+                            if (Math.abs(a.y - box.y) < 10) shift = -distance;
+                            else if (Math.abs(a.y - (box.y + box.height)) < 10) shift = distance;
+                        }
+                        if (shift === 0) return;
+
+                        // if this is the first/last segment, its end must stay on the element's side
+                        const ends = [];
+                        if (i - 1 === 0) ends.push({ point: a, box: boxes[route.edge.sources[0]] });
+                        if (i === p.length - 1) ends.push({ point: b, box: boxes[route.edge.targets[0]] });
+                        const ok = ends.every(function(end) {
+                            if (end.box === undefined) return false;
+                            const position = (vertical ? end.point.x : end.point.y) + shift;
+                            return vertical ?
+                                (position >= end.box.x + 10 && position <= end.box.x + end.box.width - 10) :
+                                (position >= end.box.y + 10 && position <= end.box.y + end.box.height - 10);
+                        });
+                        if (!ok) return;
+
+                        if (vertical) {
+                            a.x += shift;
+                            b.x += shift;
+                        } else {
+                            a.y += shift;
+                            b.y += shift;
+                        }
+                    });
+                }
+            });
+        };
+
+        // the borders of boundaries/groups/deployment nodes, as lines
+        const boundaryBorders = function(boxes) {
+            const borders = [];
+            Object.keys(nodesById).forEach(function(id) {
+                const box = boxes[id];
+                if (nodesById[id].children === undefined || box === undefined) return;
+                const tl = { x: box.x, y: box.y };
+                const tr = { x: box.x + box.width, y: box.y };
+                const bl = { x: box.x, y: box.y + box.height };
+                const br = { x: box.x + box.width, y: box.y + box.height };
+                borders.push({ points: [ tl, tr, br, bl, tl ], box: box });
+            });
+            return borders;
+        };
+
+        const leafBoxes = function(boxes) {
+            return Object.keys(nodesById).concat(Object.keys(externalIds)).filter(function(id) {
+                return (externalIds[id] || nodesById[id].children === undefined) && boxes[id] !== undefined;
+            }).map(function(id) { return boxes[id]; });
+        };
+
+        // first decide where everything goes, then attach each relationship to its own point on the most appropriate
+        // sides of its elements (which also lines everything up again)
+        const elk = new ELK();
+        return elk.layout(buildElkGraph(undefined)).then(function(firstResult) {
+            if (renderedView !== currentView) {
+                return undefined;
+            }
+
+            const boxes = calculateAbsolutePositions(firstResult).boxes;
+            portOrderBoxes = boxes;
+            return elk.layout(buildElkGraph(chooseSides(boxes)));
+        }).then(function(result) {
+            if (result === undefined || renderedView !== currentView) {
+                // the view changed while the layout was running
+                return;
+            }
+
+            const extracted = extractRoutes(result);
+            const absolute = extracted.absolute;
+            const routes = extracted.routes;
+
+            // 1. position the leaf elements (boundaries are resized around their contents automatically)
+            Object.keys(nodesById).forEach(function(id) {
+                const node = nodesById[id];
+                if (node.children === undefined && absolute[id] !== undefined) {
+                    positionElement(node.cell, absolute[id].x, absolute[id].y);
+                }
+            });
+            repositionAllParentCells();
+
+            // boundaries are drawn (sized) by Structurizr, so use where they actually are for the finishing touches
+            const finalBoxes = Object.assign({}, extracted.boxes);
+            Object.keys(nodesById).forEach(function(id) {
+                if (nodesById[id].children !== undefined) {
+                    const bbox = nodesById[id].cell.getBBox();
+                    finalBoxes[id] = { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
+                }
+            });
+            if (externals.length > 0) {
+                const leafIds = Object.keys(nodesById).filter(function(id) { return nodesById[id].children === undefined; });
+                const placed = placeExternalsRight(finalBoxes, leafIds, externals.map(function(cell) {
+                    return { id: '' + cell.id, width: cell.size().width, height: cell.size().height };
+                }), externalEdges.map(function(edge) {
+                    return { id: edge.id, source: edge.sources[0], target: edge.targets[0], labelWidth: (edge.labels && edge.labels.length > 0) ? edge.labels[0].width * 0.8 : 0, labelHeight: (edge.labels && edge.labels.length > 0) ? edge.labels[0].height : 0 };
+                }), routes);
+                externals.forEach(function(cell) {
+                    const position = placed.positions['' + cell.id];
+                    positionElement(cell, position.x, position.y);
+                    finalBoxes['' + cell.id] = { x: position.x, y: position.y, width: cell.size().width, height: cell.size().height };
+                });
+                externalEdges.forEach(function(edge) {
+                    const route = placed.routes.filter(function(r) { return r.id === edge.id; })[0];
+                    if (route !== undefined) {
+                        routes.push({ edge: edge, points: route.points });
+                    }
+                });
+            }
+
+            removeJogs(routes, finalBoxes);
+            moveOffBorders(routes, finalBoxes);
+            placeLabels(routes, leafBoxes(finalBoxes), boundaryBorders(finalBoxes));
+
+            // 2. route each relationship along the orthogonal path calculated by ELK, with its label where ELK put it
+            routes.forEach(function(route) {
+                const link = route.edge.link;
+
+                // ELK's route is already orthogonal, so draw straight segments between its points (the orthogonal router would re-route it)
+                link.unset('router');
+                if (editable && link.relationshipInView) {
+                    link.relationshipInView.routing = 'Direct';
+                }
+                const vertices = route.points.map(function(p) { return { x: Math.round(p.x), y: Math.round(p.y) }; });
+
+                // ELK's start/end points are on the element borders; nudge them slightly outwards (along the line),
+                // so that JointJS can always find where the line meets the element
+                const nudge = function(point, towards) {
+                    const dx = towards.x - point.x;
+                    const dy = towards.y - point.y;
+                    const length = Math.sqrt((dx * dx) + (dy * dy));
+                    if (length > 4) {
+                        point.x = Math.round(point.x + (dx / length) * 3);
+                        point.y = Math.round(point.y + (dy / length) * 3);
+                    }
+                };
+                if (vertices.length >= 2) {
+                    nudge(vertices[0], vertices[1]);
+                    nudge(vertices[vertices.length - 1], vertices[vertices.length - 2]);
+                }
+                link.set('vertices', vertices);
+
+                // and make the first/last segments meet the elements at right angles
+                link.prop('source/anchor', { name: 'perpendicular' });
+                link.prop('target/anchor', { name: 'perpendicular' });
+
+                if (route.labelCentre) {
+                    const linkView = paper.findViewByModel(link);
+                    const totalLength = linkView.getConnectionLength();
+                    if (totalLength > 0) {
+                        const centre = route.labelCentre;
+                        const distance = Math.min(0.95, Math.max(0.05, linkView.getClosestPointLength(centre) / totalLength));
+                        const labels = JSON.parse(JSON.stringify(link.get('labels')));
+                        labels.forEach(function(l) {
+                            l.position.distance = distance;
+                            if (l.position.calculatedOffset) {
+                                l.position.offset = l.position.calculatedOffset;
+                            }
+                        });
+                        link.set('labels', labels);
+                        if (link.relationshipInView) {
+                            link.relationshipInView.position = Math.round(distance * 100);
+                        }
+                    }
+                }
+            });
+
+            structurizr.diagram.autoPageSize();
+            structurizr.diagram.zoomToWidthOrHeight();
+            centreDiagram();
+        });
+    }
+
+    // Places "external" elements in a column to the right of the rest of the diagram, and routes the relationships to/from them.
+    //   boxes: { id: {x,y,width,height} } of everything already laid out (leaves and boundaries)
+    //   leafIds: ids of the leaf elements already laid out (obstacles)
+    //   externals: [ { id, width, height } ]
+    //   edges: [ { id, source, target, labelWidth } ] relationships that involve at least one external
+    // returns { positions: { id: {x,y} }, routes: [ { id, points } ] }
+    function placeExternalsRight(boxes, leafIds, externals, edges, existingRoutes, options) {
+        options = options || {};
+        const channelSpacing = options.channelSpacing || 25;
+        const nodeSpacing = options.nodeSpacing || 60;
+        const margin = 30;
+        const isExternal = {};
+        externals.forEach(function(e) { isExternal[e.id] = true; });
+
+        const all = Object.keys(boxes).map(function(id) { return boxes[id]; });
+        const right = Math.max.apply(null, all.map(function(b) { return b.x + b.width; }));
+        const top = Math.min.apply(null, all.map(function(b) { return b.y; }));
+        const obstacles = leafIds.map(function(id) { return boxes[id]; }).filter(function(b) { return b !== undefined; });
+
+        const crossEdges = edges.filter(function(e) {
+            return isExternal[e.source] !== isExternal[e.target] && boxes[isExternal[e.source] ? e.target : e.source] !== undefined;
+        });
+        const labelWidth = Math.max.apply(null, [ 0 ].concat(crossEdges.map(function(e) { return e.labelWidth || 0; })));
+        // horizontal lines into the column carry labels, so keep them far enough apart for those
+        const pointSpacing = Math.max(40, 10 + Math.max.apply(null, [ 0 ].concat(crossEdges.map(function(e) { return e.labelHeight || 0; }))));
+        const channelsWidth = (crossEdges.length + 1) * channelSpacing;
+        const gap = Math.max(channelsWidth + labelWidth + 40, 120);
+        const columnX = right + gap;
+
+        // 1. the order and vertical position of the externals: next to the middle of the elements they're connected to
+        const wanted = {};
+        externals.forEach(function(ext) {
+            const ys = [];
+            crossEdges.forEach(function(e) {
+                const other = e.source === ext.id ? e.target : (e.target === ext.id ? e.source : undefined);
+                if (other !== undefined && boxes[other]) ys.push(boxes[other].y + (boxes[other].height / 2));
+            });
+            wanted[ext.id] = ys.length > 0 ? ys.reduce(function(a, b) { return a + b; }, 0) / ys.length : top;
+        });
+        const column = externals.slice().sort(function(a, b) { return wanted[a.id] - wanted[b.id]; });
+        const width = Math.max.apply(null, column.map(function(e) { return e.width; }));
+        const positions = {};
+        var previousBottom = -Infinity;
+        column.forEach(function(ext) {
+            var y = Math.max(wanted[ext.id] - (ext.height / 2), previousBottom + nodeSpacing, top);
+            positions[ext.id] = { x: columnX + ((width - ext.width) / 2), y: y };
+            previousBottom = y + ext.height;
+        });
+        const extBox = function(id) { const e = externals.filter(function(x) { return x.id === id; })[0]; return { x: positions[id].x, y: positions[id].y, width: e.width, height: e.height }; };
+
+        const blocked = function(a, b, except) {
+            return obstacles.some(function(box) {
+                if (except.indexOf(box) > -1) return false;
+                if (Math.abs(a.y - b.y) < 1) {
+                    return a.y > box.y - 5 && a.y < box.y + box.height + 5 && Math.max(a.x, b.x) > box.x && Math.min(a.x, b.x) < box.x + box.width;
+                }
+                return a.x > box.x - 5 && a.x < box.x + box.width + 5 && Math.max(a.y, b.y) > box.y && Math.min(a.y, b.y) < box.y + box.height;
+            });
+        };
+
+        // 2. points on the sides: the externals' left sides, spread in order of where the lines come from
+        const resolve = function(wants, lo, hi, gap) {
+            // wants: array of numbers (already in the desired order); returns positions at least gap apart within [lo, hi]
+            const n = wants.length;
+            const g = n > 1 ? Math.min(gap, (hi - lo) / (n - 1)) : 0;
+            const p = wants.map(function(w) { return Math.min(hi, Math.max(lo, w)); });
+            for (var i = 1; i < n; i++) p[i] = Math.max(p[i], p[i - 1] + g);
+            for (var j = n - 1; j >= 0; j--) p[j] = Math.min(p[j], j === n - 1 ? hi : p[j + 1] - g);
+            for (var k = 1; k < n; k++) p[k] = Math.max(p[k], p[k - 1] + g);
+            return p;
+        };
+        const spreadOn = function(lo, hi, count, index) {
+            return lo + ((hi - lo) * (index + 1) / (count + 1));
+        };
+        const extPoint = {};
+        externals.forEach(function(ext) {
+            const mine = crossEdges.filter(function(e) { return e.source === ext.id || e.target === ext.id; });
+            mine.sort(function(a, b) {
+                const oa = boxes[a.source === ext.id ? a.target : a.source], ob = boxes[b.source === ext.id ? b.target : b.source];
+                return (oa.y + oa.height / 2) - (ob.y + ob.height / 2);
+            });
+            const box = extBox(ext.id);
+            const wants = mine.map(function(e) { const o = boxes[e.source === ext.id ? e.target : e.source]; return o.y + (o.height / 2); });
+            const ys = resolve(wants, box.y + margin, box.y + box.height - margin, pointSpacing);
+            mine.forEach(function(e, i) { extPoint[e.id] = { x: box.x, y: ys[i] }; });
+        });
+
+        // 3. route each relationship: out of the element's right side (or its top/bottom when something is in the way),
+        //    along its own channel, and into the external's left side
+        const routes = [];
+        const exits = {};
+        crossEdges.forEach(function(e) {
+            const internalId = isExternal[e.source] ? e.target : e.source;
+            (exits[internalId] = exits[internalId] || []).push(e);
+        });
+
+        const sidePoint = {};
+        Object.keys(exits).forEach(function(id) {
+            const box = boxes[id];
+            const list = exits[id].slice().sort(function(a, b) { return extPoint[a.id].y - extPoint[b.id].y; });
+            const ys = resolve(list.map(function(e) { return extPoint[e.id].y; }), box.y + margin, box.y + box.height - margin, pointSpacing);
+            list.forEach(function(e, i) { sidePoint[e.id] = ys[i]; });
+        });
+
+        var channel = 0;
+        const corridors = [];
+        const usedPoints = [];
+        (existingRoutes || []).forEach(function(r) { usedPoints.push(r.points[0]); usedPoints.push(r.points[r.points.length - 1]); });
+        // channels: lines that go further down get the channels further right, so that they don't cross
+        const order = crossEdges.slice().sort(function(a, b) { return extPoint[a.id].y - extPoint[b.id].y; });
+        order.forEach(function(e) {
+            const internalId = isExternal[e.source] ? e.target : e.source;
+            const box = boxes[internalId];
+            const end = extPoint[e.id];
+            const channelX = right + ((channel++ + 1) * channelSpacing);
+            const siblings = exits[internalId];
+            const index = siblings.indexOf(e);
+            var points;
+
+            // straight out of the right side, lined up with the external if possible
+            const lo = box.y + margin, hi = box.y + box.height - margin;
+            var y = sidePoint[e.id];
+            const start = { x: box.x + box.width, y: y };
+            if (!blocked(start, { x: channelX, y: y }, [ box ])) {
+                points = Math.abs(y - end.y) < 1 ? [ start, end ] : [ start, { x: channelX, y: y }, { x: channelX, y: end.y }, end ];
+            } else {
+                // out of the top or bottom, along the free space between two rows, then right
+                const down = end.y > box.y + (box.height / 2);
+                const sideY = down ? box.y + box.height : box.y;
+
+                // a point on that side that's clear of the other lines (as far right as possible)
+                const taken = usedPoints.filter(function(p) { return Math.abs(p.y - sideY) < 2; }).map(function(p) { return p.x; });
+                var sx = undefined;
+                for (var x = box.x + box.width - margin; x >= box.x + margin; x -= 5) {
+                    if (taken.every(function(t) { return Math.abs(t - x) >= 40; })) { sx = x; break; }
+                }
+                if (sx === undefined) sx = box.x + box.width - margin;
+                usedPoints.push({ x: sx, y: sideY });
+
+                // the free space (between rows) nearest to the element, for a horizontal line from sx to the channel
+                const spans = obstacles.filter(function(o) { return o !== box && o.x + o.width > sx && o.x < channelX; })
+                    .map(function(o) { return [ o.y - 15, o.y + o.height + 15 ]; })
+                    .concat(corridors.filter(function(c) { return c.x1 > sx && c.x0 < channelX; }).map(function(c) { return [ c.y - channelSpacing / 2, c.y + channelSpacing / 2 ]; }));
+                const free = function(y) { return spans.every(function(s) { return y <= s[0] || y >= s[1]; }); };
+                var corridorY = undefined;
+                for (var d = 20; d < 2000; d += 5) {
+                    const y = down ? sideY + d : sideY - d;
+                    if (free(y)) {
+                        // prefer the middle of the free space
+                        var y2 = y;
+                        while (free(down ? y2 + 5 : y2 - 5) && Math.abs(y2 - y) < 40) y2 = down ? y2 + 5 : y2 - 5;
+                        corridorY = (y + y2) / 2;
+                        break;
+                    }
+                }
+                if (corridorY === undefined) corridorY = down ? sideY + 20 : sideY - 20;
+                corridors.push({ x0: sx, x1: channelX, y: corridorY });
+                points = [ { x: sx, y: sideY }, { x: sx, y: corridorY }, { x: channelX, y: corridorY }, { x: channelX, y: end.y }, end ];
+            }
+
+            if (e.source !== internalId) points.reverse();
+            routes.push({ id: e.id, points: points });
+        });
+
+        // 4. relationships between externals: down the column, or round the right-hand side
+        edges.filter(function(e) { return isExternal[e.source] && isExternal[e.target] && positions[e.source] && positions[e.target]; }).forEach(function(e) {
+            const s = extBox(e.source), t = extBox(e.target);
+            const x = columnX + (width / 2);
+            if (s.y < t.y) {
+                routes.push({ id: e.id, points: [ { x: x, y: s.y + s.height }, { x: x, y: t.y } ] });
+            } else {
+                routes.push({ id: e.id, points: [ { x: x, y: s.y }, { x: x, y: t.y + t.height } ] });
+            }
+        });
+
+        return { positions: positions, routes: routes };
+    }
+
+    // the same padding that is used when resizing boundaries/groups/deployment nodes around their contents
+    function getBoundaryPadding(parentCell) {
+        const margin = 15;
+        const padding = { top: clusterPadding, right: clusterPadding, bottom: clusterPadding + margin, left: clusterPadding };
+
+        try {
+            const metadataText = parentCell.attr('.structurizrMetaData') ? parentCell.attr('.structurizrMetaData').text : undefined;
+            const nameFontSize = parseInt(parentCell.attr('.structurizrName')['font-size']) || 24;
+            const metadataFontSize = parentCell.attr('.structurizrMetaData') ? (parseInt(parentCell.attr('.structurizrMetaData')['font-size']) || 0) : 0;
+
+            if (metadataText && metadataText.length > 0) {
+                padding.bottom = padding.bottom + nameFontSize + metadataFontSize + margin;
+            } else {
+                padding.bottom = padding.bottom + nameFontSize + margin;
+            }
+        } catch (e) {
+            padding.bottom = padding.bottom + 50;
+        }
+
+        return padding;
+    }
+
+    function applyDagreLayout(rankDirection, rankSeparation, nodeSeparation, edgeSeparation, linkVertices) {
         try {
             var cellViews = [];
             cells.forEach(function(cell) {
